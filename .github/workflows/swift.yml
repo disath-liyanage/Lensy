@@ -1,4 +1,4 @@
-name: Lensy-buld
+name: Lensy-build
 
 on:
   push:
