@@ -114,6 +114,8 @@ final class AuthStore {
 final class SyncService {
     var activeStartedAt: Date?
     var status = ""
+    var menuTitle = ""
+    @ObservationIgnored private var ticker: Timer?
 
     @ObservationIgnored private let container: ModelContainer
     @ObservationIgnored private var isSyncing = false
@@ -147,6 +149,37 @@ final class SyncService {
     func refreshActive() {
         activeStartedAt = fetchActive()?.startedAt
         UserDefaults.standard.set(activeStartedAt != nil, forKey: "timerRunning")
+        updateTicker()
+    }
+
+    private func updateTicker() {
+        guard activeStartedAt != nil else {
+            ticker?.invalidate()
+            ticker = nil
+            menuTitle = ""
+            return
+        }
+        tick()
+        if ticker == nil {
+            ticker = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+                Task { @MainActor in self?.tick() }
+            }
+        }
+    }
+
+    private func tick() {
+        guard let start = activeStartedAt else { return }
+        let minutes = Int(Date.now.timeIntervalSince(start)) / 60
+        let text = String(format: "%d:%02d", minutes / 60, minutes % 60)
+        if text != menuTitle { menuTitle = text }
+    }
+
+    func delete(_ s: WearSession) {
+        s.deletedAt = .now
+        s.touch()
+        try? context.save()
+        refreshActive()
+        Task { await sync() }
     }
 
     func start() {

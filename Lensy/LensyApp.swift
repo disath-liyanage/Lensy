@@ -32,5 +32,11 @@ struct LensyApp: App {
                 .environment(sync)
         }
         .modelContainer(container)
+
+        MenuBarExtra(sync.menuTitle, systemImage: "eye", isInserted: $timerRunning) {
+            MenuContent()
+                .environment(sync)
+        }
+        .menuBarExtraStyle(.window)
     }
 }
