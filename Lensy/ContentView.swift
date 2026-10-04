@@ -41,10 +41,14 @@ struct ContentView: View {
         }
         .padding()
         .frame(minWidth: 360, minHeight: 460)
+        .onAppear { print("LAUNCH: window appeared") }
         .task {
+            print("LAUNCH: task started")
             sync.refreshActive()
             await auth.restore()
+            print("LAUNCH: auth restored, logged in =", auth.isLoggedIn)
             await sync.sync()
+            print("LAUNCH: first sync done -", sync.status)
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             Task { await sync.sync() }
@@ -101,11 +105,7 @@ struct MenuLabel: View {
     @Environment(SyncService.self) private var sync
 
     var body: some View {
-        if let start = sync.activeStartedAt {
-            Text(start, style: .timer)
-        } else {
-            Image(systemName: "eye")
-        }
+        Text(sync.activeStartedAt ?? .now, style: .timer)
     }
 }
 

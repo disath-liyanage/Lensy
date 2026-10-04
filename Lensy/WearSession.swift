@@ -2,9 +2,26 @@ import Foundation
 import SwiftData
 import Supabase
 
-let supabase = SupabaseClient(
-    supabaseURL: URL(string: "https://YOUR-PROJECT.supabase.co")!,
-    supabaseKey: "YOUR-ANON-KEY"
+nonisolated struct DefaultsStorage: AuthLocalStorage {
+    func store(key: String, value: Data) throws {
+        UserDefaults.standard.set(value, forKey: "auth." + key)
+    }
+
+    func retrieve(key: String) throws -> Data? {
+        UserDefaults.standard.data(forKey: "auth." + key)
+    }
+
+    func remove(key: String) throws {
+        UserDefaults.standard.removeObject(forKey: "auth." + key)
+    }
+}
+
+nonisolated let supabase = SupabaseClient(
+    supabaseURL: URL(string: "https://cljpjblzsrvnepfxsccf.supabase.co")!,
+    supabaseKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNsanBqYmx6c3J2bmVwZnhzY2NmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTExMDk0NDEsImV4cCI6MjEwNjY4NTQ0MX0.5rvumC-tljK484FIWy42iwT-tCcMAMM597q-DMBX7lQ",
+    options: SupabaseClientOptions(
+        auth: .init(storage: DefaultsStorage(), emitLocalSessionAsInitialSession: true)
+    )
 )
 
 @Model
@@ -31,7 +48,7 @@ final class WearSession {
     }
 }
 
-struct SessionDTO: Codable {
+nonisolated struct SessionDTO: Codable, Sendable {
     var id: UUID
     var startedAt: Date
     var endedAt: Date?
@@ -45,15 +62,6 @@ struct SessionDTO: Codable {
         case endedAt = "ended_at"
         case updatedAt = "updated_at"
         case deletedAt = "deleted_at"
-    }
-
-    init(_ s: WearSession) {
-        id = s.id
-        startedAt = s.startedAt
-        endedAt = s.endedAt
-        note = s.note
-        updatedAt = s.updatedAt
-        deletedAt = s.deletedAt
     }
 
     func encode(to encoder: Encoder) throws {
@@ -117,6 +125,17 @@ final class SyncService {
 
     private var context: ModelContext { container.mainContext }
 
+    private func dto(_ s: WearSession) -> SessionDTO {
+        SessionDTO(
+            id: s.id,
+            startedAt: s.startedAt,
+            endedAt: s.endedAt,
+            note: s.note,
+            updatedAt: s.updatedAt,
+            deletedAt: s.deletedAt
+        )
+    }
+
     private func fetchActive() -> WearSession? {
         let d = FetchDescriptor<WearSession>(
             predicate: #Predicate { $0.endedAt == nil && $0.deletedAt == nil },
@@ -127,6 +146,7 @@ final class SyncService {
 
     func refreshActive() {
         activeStartedAt = fetchActive()?.startedAt
+        UserDefaults.standard.set(activeStartedAt != nil, forKey: "timerRunning")
     }
 
     func start() {
@@ -159,7 +179,8 @@ final class SyncService {
             try await push()
             status = "Synced " + Date.now.formatted(date: .omitted, time: .shortened)
         } catch {
-            status = "Sync failed: \(error.localizedDescription)"
+            print("SYNC ERROR:", error)
+            status = "Sync failed: \(error)"
         }
         isSyncing = false
         refreshActive()
@@ -215,7 +236,23 @@ final class SyncService {
         try? context.save()
     }
 
+    private func repairDuplicateIDs() {
+        let all = (try? context.fetch(
+            FetchDescriptor<WearSession>(sortBy: [SortDescriptor(\.startedAt)])
+        )) ?? []
+        var seen = Set<UUID>()
+        for s in all {
+            if !seen.insert(s.id).inserted {
+                s.id = UUID()
+                s.touch()
+            }
+        }
+        try? context.save()
+    }
+
     private func push() async throws {
+        repairDuplicateIDs()
+
         let dirty = try context.fetch(
             FetchDescriptor<WearSession>(predicate: #Predicate { $0.needsSync == true })
         )
@@ -226,12 +263,11 @@ final class SyncService {
             let sent = batch.map { ($0, $0.updatedAt) }
             try await supabase
                 .from("wear_sessions")
-                .upsert(batch.map { SessionDTO($0) })
+                .upsert(batch.map { dto($0) })
                 .execute()
             for (s, at) in sent where s.updatedAt == at {
                 s.needsSync = false
             }
             try context.save()
         }
-    }
-}
+    }}

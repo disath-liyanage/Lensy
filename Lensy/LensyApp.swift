@@ -6,11 +6,23 @@ struct LensyApp: App {
     let container: ModelContainer
     @State private var auth = AuthStore()
     @State private var sync: SyncService
+    @AppStorage("timerRunning") private var timerRunning = false
 
     init() {
-        let c = try! ModelContainer(for: WearSession.self)
+        let c: ModelContainer
+        do {
+            c = try ModelContainer(for: WearSession.self)
+        } catch {
+            print("CONTAINER ERROR:", error)
+            c = try! ModelContainer(
+                for: WearSession.self,
+                configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+            )
+        }
         container = c
-        _sync = State(initialValue: SyncService(container: c))
+        let s = SyncService(container: c)
+        s.refreshActive()
+        _sync = State(initialValue: s)
     }
 
     var body: some Scene {
@@ -20,14 +32,5 @@ struct LensyApp: App {
                 .environment(sync)
         }
         .modelContainer(container)
-
-        MenuBarExtra(isInserted: Binding(get: { sync.activeStartedAt != nil }, set: { _ in })) {
-            MenuContent()
-                .environment(sync)
-        } label: {
-            MenuLabel()
-                .environment(sync)
-        }
-        .menuBarExtraStyle(.window)
     }
 }
