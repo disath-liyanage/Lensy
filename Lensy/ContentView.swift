@@ -124,13 +124,6 @@ struct TimerTab: View {
     let sessions: [WearSession]
     let limit: Int
 
-    private func ringColor(_ elapsed: TimeInterval) -> Color {
-        let max = Double(limit) * 3600
-        if elapsed > max { return .red }
-        if elapsed > max * 0.85 { return .orange }
-        return .green
-    }
-
     var body: some View {
         let totals = dayTotals(sessions, days: 7)
         let week = totals.reduce(0) { $0 + $1.hours }
@@ -141,17 +134,7 @@ struct TimerTab: View {
             Spacer(minLength: 0)
 
             if let start = sync.activeStartedAt {
-                TimelineView(.periodic(from: .now, by: 1)) { ctx in
-                    let elapsed = ctx.date.timeIntervalSince(start)
-                    RingView(
-                        progress: elapsed / (Double(limit) * 3600),
-                        color: ringColor(elapsed),
-                        title: clock(elapsed),
-                        subtitle: elapsed > Double(limit) * 3600
-                            ? "Over your \(limit)h limit"
-                            : "Started " + start.formatted(date: .omitted, time: .shortened)
-                    )
-                }
+                LiveRing(start: start, limit: limit)
             } else {
                 RingView(
                     progress: 0,
@@ -186,32 +169,98 @@ struct TimerTab: View {
     }
 }
 
+struct LiveRing: View {
+    let start: Date
+    let limit: Int
+    var size: CGFloat = 260
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { ctx in
+            let elapsed = ctx.date.timeIntervalSince(start)
+            let cap = Double(limit) * 3600
+            RingView(
+                progress: elapsed / cap,
+                color: elapsed > cap ? .red : (elapsed > cap * 0.85 ? .orange : .green),
+                title: clock(elapsed),
+                subtitle: elapsed > cap
+                    ? "Over your \(limit)h limit"
+                    : "Started " + start.formatted(date: .omitted, time: .shortened),
+                size: size
+            )
+        }
+    }
+}
+
 struct RingView: View {
     let progress: Double
     let color: Color
     let title: String
     let subtitle: String
+    var size: CGFloat = 260
 
     var body: some View {
         ZStack {
-            Circle().stroke(.quaternary, lineWidth: 16)
+            Circle().stroke(.quaternary, lineWidth: size * 0.06)
             Circle()
                 .trim(from: 0, to: min(max(progress, 0), 1))
-                .stroke(color, style: StrokeStyle(lineWidth: 16, lineCap: .round))
+                .stroke(color, style: StrokeStyle(lineWidth: size * 0.06, lineCap: .round))
                 .rotationEffect(.degrees(-90))
-            VStack(spacing: 6) {
+            VStack(spacing: 4) {
                 Text(title)
-                    .font(.system(size: 38, weight: .semibold, design: .rounded).monospacedDigit())
+                    .font(.system(size: size * 0.146, weight: .semibold, design: .rounded).monospacedDigit())
                     .minimumScaleFactor(0.5)
                     .lineLimit(1)
                 Text(subtitle)
-                    .font(.caption)
+                    .font(size < 200 ? .caption2 : .caption)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             }
-            .padding(.horizontal, 36)
+            .padding(.horizontal, size * 0.14)
         }
-        .frame(width: 260, height: 260)
+        .frame(width: size, height: size)
+    }
+}
+
+struct MenuLabel: View {
+    @Environment(SyncService.self) private var sync
+
+    private var icon: NSImage {
+        let base = NSImage(named: "MenuIcon")
+            ?? NSImage(systemSymbolName: "eye", accessibilityDescription: nil)!
+        let img = (base.copy() as? NSImage) ?? base
+        let h: CGFloat = 18
+        let w = h * img.size.width / max(img.size.height, 1)
+        img.size = NSSize(width: w, height: h)
+        img.isTemplate = true
+        return img
+    }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(nsImage: icon)
+            Text(sync.menuTitle)
+        }
+    }
+}
+
+struct MenuContent: View {
+    @Environment(SyncService.self) private var sync
+    @AppStorage("wearLimitHours") private var limit = 14
+
+    var body: some View {
+        VStack(spacing: 14) {
+            if let start = sync.activeStartedAt {
+                LiveRing(start: start, limit: limit, size: 180)
+                Button("Stop") { sync.stop() }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+            }
+            Divider()
+            Button("Quit") { NSApplication.shared.terminate(nil) }
+                .buttonStyle(.link)
+        }
+        .padding()
+        .frame(width: 240)
     }
 }
 
@@ -385,29 +434,5 @@ struct LoginSheet: View {
         .padding(24)
         .frame(width: 320)
         .onAppear { auth.errorMessage = nil }
-    }
-}
-
-struct MenuContent: View {
-    @Environment(SyncService.self) private var sync
-
-    var body: some View {
-        VStack(spacing: 12) {
-            if let start = sync.activeStartedAt {
-                Text(start, style: .timer)
-                    .font(.system(size: 34, weight: .semibold, design: .rounded).monospacedDigit())
-                Text("Started " + start.formatted(date: .omitted, time: .shortened))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Button("Stop") { sync.stop() }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.red)
-            }
-            Divider()
-            Button("Quit") { NSApplication.shared.terminate(nil) }
-                .buttonStyle(.link)
-        }
-        .padding()
-        .frame(width: 220)
     }
 }
