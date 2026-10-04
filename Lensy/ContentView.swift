@@ -1,59 +1,85 @@
-//
-//  ContentView.swift
-//  Lensy
-//
-//  Created by Disath Liyanage on 2026-10-04.
-//
-
 import SwiftUI
 import SwiftData
 
 struct ContentView: View {
-    @Environment(\.modelContext) private var modelContext
-    @Query private var items: [Item]
+    @Environment(\.modelContext) private var context
+    @AppStorage("isRunning") private var isRunning = false
+
+    @Query(filter: #Predicate<WearSession> { $0.endedAt == nil })
+    private var active: [WearSession]
+
+    @Query(sort: \WearSession.startedAt, order: .reverse)
+    private var sessions: [WearSession]
 
     var body: some View {
-        NavigationSplitView {
-            List {
-                ForEach(items) { item in
-                    NavigationLink {
-                        Text("Item at \(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))")
-                    } label: {
-                        Text(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))
-                    }
+        VStack(spacing: 16) {
+            if let session = active.first {
+                Text(session.startedAt, style: .timer)
+                    .font(.system(size: 48, weight: .semibold).monospacedDigit())
+                Button("Stop") {
+                    session.endedAt = .now
+                    try? context.save()
                 }
-                .onDelete(perform: deleteItems)
-            }
-            .navigationSplitViewColumnWidth(min: 180, ideal: 200)
-            .toolbar {
-                ToolbarItem {
-                    Button(action: addItem) {
-                        Label("Add Item", systemImage: "plus")
-                    }
+            } else {
+                Button("Start") {
+                    context.insert(WearSession())
+                    try? context.save()
                 }
             }
-        } detail: {
-            Text("Select an item")
-        }
-    }
 
-    private func addItem() {
-        withAnimation {
-            let newItem = Item(timestamp: Date())
-            modelContext.insert(newItem)
-        }
-    }
+            Divider()
 
-    private func deleteItems(offsets: IndexSet) {
-        withAnimation {
-            for index in offsets {
-                modelContext.delete(items[index])
+            List(sessions.filter { $0.endedAt != nil }) { s in
+                HStack {
+                    Text(s.startedAt.formatted(date: .abbreviated, time: .shortened))
+                    Spacer()
+                    Text(Duration.seconds(s.duration)
+                        .formatted(.units(allowed: [.hours, .minutes], width: .abbreviated)))
+                        .monospacedDigit()
+                }
             }
+        }
+        .padding()
+        .frame(minWidth: 360, minHeight: 420)
+        .onChange(of: active.count, initial: true) { _, count in
+            isRunning = count > 0
         }
     }
 }
 
-#Preview {
-    ContentView()
-        .modelContainer(for: Item.self, inMemory: true)
+struct MenuLabel: View {
+    @Query(filter: #Predicate<WearSession> { $0.endedAt == nil })
+    private var active: [WearSession]
+
+    var body: some View {
+        if let session = active.first {
+            Text(session.startedAt, style: .timer)
+        } else {
+            Image(systemName: "eye")
+        }
+    }
+}
+
+struct MenuContent: View {
+    @Environment(\.modelContext) private var context
+
+    @Query(filter: #Predicate<WearSession> { $0.endedAt == nil })
+    private var active: [WearSession]
+
+    var body: some View {
+        VStack(spacing: 12) {
+            if let session = active.first {
+                Text(session.startedAt, style: .timer)
+                    .font(.largeTitle.monospacedDigit())
+                Button("Stop") {
+                    session.endedAt = .now
+                    try? context.save()
+                }
+            }
+            Divider()
+            Button("Quit") { NSApplication.shared.terminate(nil) }
+        }
+        .padding()
+        .frame(width: 220)
+    }
 }

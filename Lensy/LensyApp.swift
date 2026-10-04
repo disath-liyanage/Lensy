@@ -1,23 +1,15 @@
-//
-//  LensyApp.swift
-//  Lensy
-//
-//  Created by Disath Liyanage on 2026-10-04.
-//
-
 import SwiftUI
 import SwiftData
 
 @main
 struct LensyApp: App {
-    var sharedModelContainer: ModelContainer = {
-        let schema = Schema([
-            Item.self,
-        ])
-        let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
+    @AppStorage("isRunning") private var isRunning = false
 
+    var sharedModelContainer: ModelContainer = {
+        let schema = Schema([WearSession.self])
+        let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
         do {
-            return try ModelContainer(for: schema, configurations: [modelConfiguration])
+            return try ModelContainer(for: schema, configurations: [config])
         } catch {
             fatalError("Could not create ModelContainer: \(error)")
         }
@@ -27,6 +19,14 @@ struct LensyApp: App {
         WindowGroup {
             ContentView()
         }
+        .modelContainer(sharedModelContainer)
+
+        MenuBarExtra(isInserted: $isRunning) {
+            MenuContent()
+        } label: {
+            MenuLabel()
+        }
+        .menuBarExtraStyle(.window)
         .modelContainer(sharedModelContainer)
     }
 }
