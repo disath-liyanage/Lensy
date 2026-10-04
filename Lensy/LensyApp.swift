@@ -3,30 +3,31 @@ import SwiftData
 
 @main
 struct LensyApp: App {
-    @AppStorage("isRunning") private var isRunning = false
+    let container: ModelContainer
+    @State private var auth = AuthStore()
+    @State private var sync: SyncService
 
-    var sharedModelContainer: ModelContainer = {
-        let schema = Schema([WearSession.self])
-        let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
-        do {
-            return try ModelContainer(for: schema, configurations: [config])
-        } catch {
-            fatalError("Could not create ModelContainer: \(error)")
-        }
-    }()
+    init() {
+        let c = try! ModelContainer(for: WearSession.self)
+        container = c
+        _sync = State(initialValue: SyncService(container: c))
+    }
 
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .environment(auth)
+                .environment(sync)
         }
-        .modelContainer(sharedModelContainer)
+        .modelContainer(container)
 
-        MenuBarExtra(isInserted: $isRunning) {
+        MenuBarExtra(isInserted: Binding(get: { sync.activeStartedAt != nil }, set: { _ in })) {
             MenuContent()
+                .environment(sync)
         } label: {
             MenuLabel()
+                .environment(sync)
         }
         .menuBarExtraStyle(.window)
-        .modelContainer(sharedModelContainer)
     }
 }

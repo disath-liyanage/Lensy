@@ -2,34 +2,32 @@ import SwiftUI
 import SwiftData
 
 struct ContentView: View {
-    @Environment(\.modelContext) private var context
-    @AppStorage("isRunning") private var isRunning = false
+    @Environment(AuthStore.self) private var auth
+    @Environment(SyncService.self) private var sync
 
-    @Query(filter: #Predicate<WearSession> { $0.endedAt == nil })
-    private var active: [WearSession]
+    @Query(
+        filter: #Predicate<WearSession> { $0.endedAt != nil && $0.deletedAt == nil },
+        sort: \WearSession.startedAt,
+        order: .reverse
+    )
+    private var finished: [WearSession]
 
-    @Query(sort: \WearSession.startedAt, order: .reverse)
-    private var sessions: [WearSession]
+    @State private var email = ""
+    @State private var password = ""
 
     var body: some View {
         VStack(spacing: 16) {
-            if let session = active.first {
-                Text(session.startedAt, style: .timer)
+            if let start = sync.activeStartedAt {
+                Text(start, style: .timer)
                     .font(.system(size: 48, weight: .semibold).monospacedDigit())
-                Button("Stop") {
-                    session.endedAt = .now
-                    try? context.save()
-                }
+                Button("Stop") { sync.stop() }
             } else {
-                Button("Start") {
-                    context.insert(WearSession())
-                    try? context.save()
-                }
+                Button("Start") { sync.start() }
             }
 
             Divider()
 
-            List(sessions.filter { $0.endedAt != nil }) { s in
+            List(finished) { s in
                 HStack {
                     Text(s.startedAt.formatted(date: .abbreviated, time: .shortened))
                     Spacer()
@@ -38,22 +36,73 @@ struct ContentView: View {
                         .monospacedDigit()
                 }
             }
+
+            footer
         }
         .padding()
-        .frame(minWidth: 360, minHeight: 420)
-        .onChange(of: active.count, initial: true) { _, count in
-            isRunning = count > 0
+        .frame(minWidth: 360, minHeight: 460)
+        .task {
+            sync.refreshActive()
+            await auth.restore()
+            await sync.sync()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            Task { await sync.sync() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
+            Task { await sync.sync() }
+        }
+        .alert("Error", isPresented: Binding(
+            get: { auth.errorMessage != nil },
+            set: { _ in auth.errorMessage = nil }
+        )) {
+            Button("OK") {}
+        } message: {
+            Text(auth.errorMessage ?? "")
+        }
+    }
+
+    @ViewBuilder
+    private var footer: some View {
+        if auth.isLoggedIn {
+            HStack {
+                Text(sync.status)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Sign out") { Task { await auth.signOut() } }
+                    .font(.caption)
+            }
+        } else {
+            VStack(spacing: 8) {
+                TextField("Email", text: $email)
+                SecureField("Password", text: $password)
+                HStack {
+                    Button("Sign in") {
+                        Task {
+                            await auth.signIn(email: email, password: password)
+                            await sync.sync()
+                        }
+                    }
+                    Button("Sign up") {
+                        Task {
+                            await auth.signUp(email: email, password: password)
+                            await sync.sync()
+                        }
+                    }
+                }
+            }
+            .frame(width: 260)
         }
     }
 }
 
 struct MenuLabel: View {
-    @Query(filter: #Predicate<WearSession> { $0.endedAt == nil })
-    private var active: [WearSession]
+    @Environment(SyncService.self) private var sync
 
     var body: some View {
-        if let session = active.first {
-            Text(session.startedAt, style: .timer)
+        if let start = sync.activeStartedAt {
+            Text(start, style: .timer)
         } else {
             Image(systemName: "eye")
         }
@@ -61,20 +110,14 @@ struct MenuLabel: View {
 }
 
 struct MenuContent: View {
-    @Environment(\.modelContext) private var context
-
-    @Query(filter: #Predicate<WearSession> { $0.endedAt == nil })
-    private var active: [WearSession]
+    @Environment(SyncService.self) private var sync
 
     var body: some View {
         VStack(spacing: 12) {
-            if let session = active.first {
-                Text(session.startedAt, style: .timer)
+            if let start = sync.activeStartedAt {
+                Text(start, style: .timer)
                     .font(.largeTitle.monospacedDigit())
-                Button("Stop") {
-                    session.endedAt = .now
-                    try? context.save()
-                }
+                Button("Stop") { sync.stop() }
             }
             Divider()
             Button("Quit") { NSApplication.shared.terminate(nil) }

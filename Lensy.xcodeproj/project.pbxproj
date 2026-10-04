@@ -6,6 +6,10 @@
 	objectVersion = 110;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		B333359230728996007C558D /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = B333359130728996007C558D /* Supabase */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		B3BD31DA3072411E00B241CD /* Lensy.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Lensy.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -22,6 +26,7 @@
 		B3BD31D73072411E00B241CD /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			files = (
+				B333359230728996007C558D /* Supabase in Frameworks */,
 			);
 		};
 /* End PBXFrameworksBuildPhase section */
@@ -60,6 +65,9 @@
 				B3BD31DC3072411E00B241CD /* Lensy */,
 			);
 			name = Lensy;
+			packageProductDependencies = (
+				B333359130728996007C558D /* Supabase */,
+			);
 			productName = Lensy;
 			productReference = B3BD31DA3072411E00B241CD /* Lensy.app */;
 			productType = "com.apple.product-type.application";
@@ -88,6 +96,9 @@
 			);
 			mainGroup = B3BD31D13072411E00B241CD;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				B333359030728996007C558D /* XCRemoteSwiftPackageReference "supabase-swift" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = B3BD31DB3072411E00B241CD /* Products */;
 			projectDirPath = "";
@@ -323,6 +334,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		B333359030728996007C558D /* XCRemoteSwiftPackageReference "supabase-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/supabase/supabase-swift";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.5.1;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		B333359130728996007C558D /* Supabase */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = B333359030728996007C558D /* XCRemoteSwiftPackageReference "supabase-swift" */;
+			productName = Supabase;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = B3BD31D23072411E00B241CD /* Project object */;
 	validationLevel = 1;
