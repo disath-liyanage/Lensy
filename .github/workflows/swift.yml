@@ -1,0 +1,32 @@
+name: Lensy-buld
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Lensy
+        run: |
+          xcodebuild \
+            -project Lensy.xcodeproj \
+            -scheme Lensy \
+            -configuration Debug \
+            -sdk macosx \
+            build
+
+      - name: Test Lensy
+        run: |
+          xcodebuild \
+            -project Lensy.xcodeproj \
+            -scheme Lensy \
+            -destination 'platform=macOS' \
+            test
