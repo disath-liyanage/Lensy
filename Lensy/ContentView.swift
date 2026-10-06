@@ -2,6 +2,12 @@ import SwiftUI
 import SwiftData
 import Charts
 
+private var mondayCalendar: Calendar {
+    var c = Calendar.current
+    c.firstWeekday = 2
+    return c
+}
+
 private func clock(_ t: TimeInterval) -> String {
     let s = Int(max(t, 0))
     return String(format: "%02d:%02d:%02d", s / 3600, (s % 3600) / 60, s % 60)
@@ -12,32 +18,174 @@ private func hm(_ hours: Double) -> String {
     return m >= 60 ? "\(m / 60)h \(m % 60)m" : "\(m)m"
 }
 
+enum Period: String, CaseIterable, Hashable {
+    case week = "Week"
+    case month = "Month"
+    case year = "Year"
+    case all = "All"
+}
+
+private func interval(_ p: Period, anchor: Date) -> DateInterval? {
+    let cal = mondayCalendar
+    switch p {
+    case .week: return cal.dateInterval(of: .weekOfYear, for: anchor)
+    case .month: return cal.dateInterval(of: .month, for: anchor)
+    case .year: return cal.dateInterval(of: .year, for: anchor)
+    case .all: return nil
+    }
+}
+
+private func shifted(_ p: Period, anchor: Date, by n: Int) -> Date {
+    let cal = mondayCalendar
+    switch p {
+    case .week: return cal.date(byAdding: .weekOfYear, value: n, to: anchor) ?? anchor
+    case .month: return cal.date(byAdding: .month, value: n, to: anchor) ?? anchor
+    case .year: return cal.date(byAdding: .year, value: n, to: anchor) ?? anchor
+    case .all: return anchor
+    }
+}
+
+private func periodTitle(_ p: Period, _ iv: DateInterval?) -> String {
+    guard let iv else { return "All time" }
+    switch p {
+    case .week:
+        let last = iv.end.addingTimeInterval(-1)
+        return iv.start.formatted(.dateTime.day().month(.abbreviated))
+            + " - "
+            + last.formatted(.dateTime.day().month(.abbreviated).year())
+    case .month: return iv.start.formatted(.dateTime.month(.wide).year())
+    case .year: return iv.start.formatted(.dateTime.year())
+    case .all: return "All time"
+    }
+}
+
 struct DayTotal: Identifiable {
     let day: Date
     let hours: Double
     var id: Date { day }
 }
 
-private func dayTotals(_ sessions: [WearSession], days: Int) -> [DayTotal] {
-    let cal = Calendar.current
-    let today = cal.startOfDay(for: .now)
-    return (0..<days).reversed().map { offset in
-        let start = cal.date(byAdding: .day, value: -offset, to: today)!
-        let end = cal.date(byAdding: .day, value: 1, to: start)!
+private func dayTotals(_ sessions: [WearSession], in iv: DateInterval) -> [DayTotal] {
+    let cal = mondayCalendar
+    var result: [DayTotal] = []
+    var day = cal.startOfDay(for: iv.start)
+    while day < iv.end {
+        let next = cal.date(byAdding: .day, value: 1, to: day)!
         let secs = sessions.reduce(0.0) { acc, s in
-            let a = max(s.startedAt, start)
-            let b = min(s.endedAt ?? .now, end)
+            let a = max(s.startedAt, day)
+            let b = min(s.endedAt ?? .now, next)
             return acc + max(0, b.timeIntervalSince(a))
         }
-        return DayTotal(day: start, hours: secs / 3600)
+        result.append(DayTotal(day: day, hours: secs / 3600))
+        day = next
+    }
+    return result
+}
+
+private func timeRange(_ s: WearSession) -> String {
+    let start = s.startedAt.formatted(date: .omitted, time: .shortened)
+    guard let end = s.endedAt else { return start + " - now" }
+    let cal = mondayCalendar
+    let days = cal.dateComponents(
+        [.day],
+        from: cal.startOfDay(for: s.startedAt),
+        to: cal.startOfDay(for: end)
+    ).day ?? 0
+    return start + " - " + end.formatted(date: .omitted, time: .shortened)
+        + (days > 0 ? " (+\(days)d)" : "")
+}
+
+struct PillBar<Option: Hashable>: View {
+    let options: [Option]
+    @Binding var selection: Option
+    let title: (Option) -> String
+    var icon: (Option) -> String? = { _ in nil }
+    var compact = false
+    @Namespace private var ns
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(options, id: \.self) { option in
+                let selected = option == selection
+                Button {
+                    withAnimation(.snappy(duration: 0.22)) { selection = option }
+                } label: {
+                    HStack(spacing: 6) {
+                        if let name = icon(option) { Image(systemName: name) }
+                        Text(title(option))
+                    }
+                    .font(compact ? .caption.weight(.medium) : .callout.weight(.medium))
+                    .padding(.horizontal, compact ? 10 : 14)
+                    .padding(.vertical, compact ? 4 : 6)
+                    .foregroundStyle(selected ? Color.white : Color.secondary)
+                    .background {
+                        if selected {
+                            Capsule()
+                                .fill(Color.accentColor)
+                                .matchedGeometryEffect(id: "pill", in: ns)
+                        }
+                    }
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(3)
+        .background(.quaternary.opacity(0.6), in: Capsule())
     }
 }
 
-enum MainTab: String, CaseIterable, Identifiable {
+enum MainTab: String, CaseIterable, Hashable {
     case timer = "Timer"
     case history = "History"
     case reports = "Reports"
-    var id: String { rawValue }
+
+    var icon: String {
+        switch self {
+        case .timer: "timer"
+        case .history: "clock.arrow.circlepath"
+        case .reports: "chart.bar.xaxis"
+        }
+    }
+}
+
+struct PeriodBar: View {
+    @Binding var period: Period
+    @Binding var anchor: Date
+    let options: [Period]
+
+    var body: some View {
+        let iv = interval(period, anchor: anchor)
+        HStack(spacing: 12) {
+            PillBar(options: options, selection: $period, title: { $0.rawValue }, compact: true)
+            Spacer()
+            if period == .all {
+                Text("All time")
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(.secondary)
+            } else {
+                Button {
+                    anchor = shifted(period, anchor: anchor, by: -1)
+                } label: {
+                    Image(systemName: "chevron.left")
+                }
+                .buttonStyle(.borderless)
+
+                Text(periodTitle(period, iv))
+                    .font(.callout.weight(.medium))
+                    .frame(minWidth: 150)
+
+                Button {
+                    anchor = shifted(period, anchor: anchor, by: 1)
+                } label: {
+                    Image(systemName: "chevron.right")
+                }
+                .buttonStyle(.borderless)
+                .disabled(iv?.contains(.now) ?? true)
+            }
+        }
+        .onChange(of: period) { anchor = .now }
+    }
 }
 
 struct ContentView: View {
@@ -53,10 +201,44 @@ struct ContentView: View {
 
     @AppStorage("wearLimitHours") private var limit = 14
     @State private var tab: MainTab = .timer
-    @State private var showLogin = false
+    @State private var confirmSignOut = false
 
     var body: some View {
+        Group {
+            if auth.isLoading {
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if !auth.isLoggedIn {
+                LoginView()
+            } else {
+                mainView
+            }
+        }
+        .frame(minWidth: 640, minHeight: 680)
+        .task {
+            sync.refreshActive()
+            await auth.restore()
+            await sync.sync(force: true)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            Task { await sync.sync() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
+            Task { await sync.sync() }
+        }
+    }
+
+    private var mainView: some View {
         VStack(spacing: 0) {
+            PillBar(
+                options: MainTab.allCases,
+                selection: $tab,
+                title: { $0.rawValue },
+                icon: { $0.icon }
+            )
+            .padding(.top, 10)
+            .padding(.bottom, 6)
+
             Group {
                 switch tab {
                 case .timer: TimerTab(sessions: sessions, limit: limit)
@@ -67,55 +249,126 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             Divider()
-            bottomBar
+
+            Text(sync.status)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
+                .help(sync.status)
         }
-        .frame(minWidth: 560, minHeight: 620)
         .toolbar {
-            ToolbarItem(placement: .principal) {
-                Picker("", selection: $tab) {
-                    ForEach(MainTab.allCases) { Text($0.rawValue).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: 280)
+            ToolbarItem(placement: .primaryAction) { accountMenu }
+        }
+        .confirmationDialog(
+            "Some records haven't synced",
+            isPresented: $confirmSignOut,
+            titleVisibility: .visible
+        ) {
+            Button("Sign out and discard them", role: .destructive) {
+                Task { await finishSignOut() }
             }
-        }
-        .sheet(isPresented: $showLogin) { LoginSheet() }
-        .task {
-            sync.refreshActive()
-            await auth.restore()
-            if !auth.isLoggedIn { showLogin = true }
-            await sync.sync()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            Task { await sync.sync() }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
-            Task { await sync.sync() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("They only exist on this Mac. Check your connection and try again, or sign out and lose them.")
         }
     }
 
-    private var bottomBar: some View {
-        HStack {
-            Text(auth.isLoggedIn ? sync.status : "Not syncing")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Spacer()
-            Stepper("Wear limit: \(limit)h", value: $limit, in: 6...24)
-                .font(.caption)
-                .controlSize(.small)
-            if auth.isLoggedIn {
-                Button("Sign out") { Task { await auth.signOut() } }
-                    .buttonStyle(.link)
-                    .font(.caption)
-            } else {
-                Button("Sign in") { showLogin = true }
-                    .buttonStyle(.link)
-                    .font(.caption)
+    private var accountMenu: some View {
+        Menu {
+            if let email = auth.email { Text(email) }
+            Divider()
+            Menu("Wear limit: \(limit) hours") {
+                Picker("Wear limit", selection: $limit) {
+                    ForEach(8...18, id: \.self) { Text("\($0) hours").tag($0) }
+                }
+                .pickerStyle(.inline)
+                .labelsHidden()
             }
+            Divider()
+            Button("Sign out", role: .destructive) {
+                Task { await requestSignOut() }
+            }
+        } label: {
+            Image(systemName: "person.crop.circle")
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
+    }
+
+    private func requestSignOut() async {
+        await sync.sync(force: true)
+        if sync.unsyncedCount() > 0 {
+            confirmSignOut = true
+        } else {
+            await finishSignOut()
+        }
+    }
+
+    private func finishSignOut() async {
+        await auth.signOut()
+        sync.wipeLocal()
+        tab = .timer
+    }
+}
+
+struct LoginView: View {
+    @Environment(AuthStore.self) private var auth
+    @Environment(SyncService.self) private var sync
+    @State private var email = ""
+    @State private var password = ""
+    @State private var busy = false
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .frame(width: 96, height: 96)
+            Text("Lensy")
+                .font(.largeTitle.weight(.semibold))
+            Text("Sign in to track your lens wear")
+                .foregroundStyle(.secondary)
+
+            VStack(spacing: 10) {
+                TextField("Email", text: $email)
+                    .textFieldStyle(.roundedBorder)
+                SecureField("Password", text: $password)
+                    .textFieldStyle(.roundedBorder)
+            }
+            .frame(width: 280)
+
+            if let e = auth.errorMessage {
+                Text(e)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .frame(width: 280)
+            }
+
+            Button {
+                busy = true
+                Task {
+                    await auth.signIn(email: email, password: password)
+                    if auth.isLoggedIn { await sync.sync(force: true) }
+                    busy = false
+                }
+            } label: {
+                Group {
+                    if busy {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Text("Sign in")
+                    }
+                }
+                .frame(width: 240)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .keyboardShortcut(.defaultAction)
+            .disabled(busy || email.isEmpty || password.isEmpty)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear { auth.errorMessage = nil }
     }
 }
 
@@ -125,10 +378,13 @@ struct TimerTab: View {
     let limit: Int
 
     var body: some View {
-        let totals = dayTotals(sessions, days: 7)
-        let week = totals.reduce(0) { $0 + $1.hours }
-        let worn = totals.filter { $0.hours > 0 }
+        let cal = mondayCalendar
+        let weekIV = interval(.week, anchor: .now) ?? DateInterval(start: .now, duration: 86400)
+        let weekDays = dayTotals(sessions, in: weekIV)
+        let week = weekDays.reduce(0) { $0 + $1.hours }
+        let worn = weekDays.filter { $0.hours > 0 }
         let avg = worn.isEmpty ? 0 : week / Double(worn.count)
+        let today = weekDays.first { cal.isDateInToday($0.day) }?.hours ?? 0
 
         VStack(spacing: 28) {
             Spacer(minLength: 0)
@@ -158,8 +414,8 @@ struct TimerTab: View {
             .tint(sync.activeStartedAt == nil ? Color.accentColor : Color.red)
 
             HStack(spacing: 12) {
-                StatTile(title: "Today", value: hm(totals.last?.hours ?? 0))
-                StatTile(title: "Last 7 days", value: hm(week))
+                StatTile(title: "Today", value: hm(today))
+                StatTile(title: "This week", value: hm(week))
                 StatTile(title: "Avg per day worn", value: hm(avg))
             }
 
@@ -221,23 +477,318 @@ struct RingView: View {
     }
 }
 
+struct StatTile: View {
+    let title: String
+    let value: String
+    var tint: Color = .primary
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.title3.weight(.semibold).monospacedDigit())
+                .foregroundStyle(tint)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+struct DayGroup: Identifiable {
+    let day: Date
+    let items: [WearSession]
+    var id: Date { day }
+    var total: Double { items.reduce(0) { $0 + $1.duration } / 3600 }
+}
+
+struct HistoryTab: View {
+    @Environment(SyncService.self) private var sync
+    let sessions: [WearSession]
+    let limit: Int
+
+    @State private var period: Period = .week
+    @State private var anchor = Date.now
+    @State private var editing: WearSession?
+    @State private var adding = false
+    @State private var toDelete: WearSession?
+
+    var body: some View {
+        let iv = interval(period, anchor: anchor)
+        let visible = sessions.filter { iv?.contains($0.startedAt) ?? true }
+        let cal = mondayCalendar
+        let groups = Dictionary(grouping: visible) { cal.startOfDay(for: $0.startedAt) }
+            .map { DayGroup(day: $0.key, items: $0.value.sorted { $0.startedAt > $1.startedAt }) }
+            .sorted { $0.day > $1.day }
+        let total = visible.reduce(0) { $0 + $1.duration } / 3600
+        let avg = groups.isEmpty ? 0 : total / Double(groups.count)
+
+        VStack(spacing: 14) {
+            HStack {
+                PeriodBar(period: $period, anchor: $anchor, options: Period.allCases)
+                Button {
+                    adding = true
+                } label: {
+                    Label("Add", systemImage: "plus")
+                }
+            }
+
+            HStack(spacing: 12) {
+                StatTile(title: "Total worn", value: hm(total))
+                StatTile(title: "Sessions", value: "\(visible.count)")
+                StatTile(title: "Avg per day", value: hm(avg))
+            }
+
+            if visible.isEmpty {
+                ContentUnavailableView(
+                    "No sessions",
+                    systemImage: "eye",
+                    description: Text("Nothing recorded in this period.")
+                )
+            } else {
+                List {
+                    ForEach(groups) { g in
+                        Section {
+                            ForEach(g.items) { s in row(s) }
+                        } header: {
+                            HStack {
+                                Text(g.day.formatted(.dateTime.weekday(.wide).day().month(.abbreviated)))
+                                Spacer()
+                                Text(hm(g.total)).monospacedDigit()
+                            }
+                            .font(.subheadline.weight(.semibold))
+                        }
+                    }
+                }
+                .listStyle(.inset)
+            }
+        }
+        .padding([.horizontal, .top], 20)
+        .sheet(item: $editing) { SessionEditor(session: $0) }
+        .sheet(isPresented: $adding) { SessionEditor(session: nil) }
+        .confirmationDialog(
+            "Delete this session?",
+            isPresented: Binding(
+                get: { toDelete != nil },
+                set: { if !$0 { toDelete = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: toDelete
+        ) { s in
+            Button("Delete", role: .destructive) {
+                sync.delete(s)
+                toDelete = nil
+            }
+            Button("Cancel", role: .cancel) { toDelete = nil }
+        } message: { s in
+            Text(s.startedAt.formatted(date: .abbreviated, time: .shortened) + ", " + hm(s.duration / 3600))
+        }
+    }
+
+    private func row(_ s: WearSession) -> some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(timeRange(s))
+                    .monospacedDigit()
+                if !s.note.isEmpty {
+                    Text(s.note)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+            if s.endedAt == nil {
+                Text("Running")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.green)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Color.green.opacity(0.18), in: Capsule())
+            } else if s.duration > Double(limit) * 3600 {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .help("Over your wear limit")
+            }
+            Text(hm(s.duration / 3600))
+                .monospacedDigit()
+                .frame(width: 76, alignment: .trailing)
+            Button {
+                editing = s
+            } label: {
+                Image(systemName: "pencil")
+            }
+            .buttonStyle(.borderless)
+            .help("Edit")
+            Button {
+                toDelete = s
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.red)
+            .help("Delete")
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+struct SessionEditor: View {
+    @Environment(SyncService.self) private var sync
+    @Environment(\.dismiss) private var dismiss
+    let session: WearSession?
+    private let wasRunning: Bool
+
+    @State private var start: Date
+    @State private var end: Date
+    @State private var running: Bool
+    @State private var note: String
+
+    init(session: WearSession?) {
+        self.session = session
+        let active = session != nil && session?.endedAt == nil
+        wasRunning = active
+        _start = State(initialValue: session?.startedAt ?? Date.now.addingTimeInterval(-8 * 3600))
+        _end = State(initialValue: session?.endedAt ?? .now)
+        _running = State(initialValue: active)
+        _note = State(initialValue: session?.note ?? "")
+    }
+
+    private var valid: Bool { running || end > start }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(session == nil ? "Add session" : "Edit session")
+                .font(.headline)
+
+            Form {
+                DatePicker("Lenses in", selection: $start, in: ...Date.now)
+                if wasRunning {
+                    Toggle("Still running", isOn: $running)
+                }
+                if !running {
+                    DatePicker("Lenses out", selection: $end, in: ...Date.now)
+                    LabeledContent("Duration") {
+                        Text(valid ? hm(end.timeIntervalSince(start) / 3600) : "End must be after start")
+                            .foregroundStyle(valid ? Color.secondary : Color.red)
+                    }
+                }
+                TextField("Note", text: $note)
+            }
+            .formStyle(.grouped)
+
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Save") {
+                    sync.save(session, start: start, end: running ? nil : end, note: note)
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(!valid)
+            }
+        }
+        .padding(20)
+        .frame(width: 420)
+    }
+}
+
+struct ReportsTab: View {
+    let sessions: [WearSession]
+    let limit: Int
+
+    @State private var period: Period = .week
+    @State private var anchor = Date.now
+
+    var body: some View {
+        let iv = interval(period, anchor: anchor) ?? DateInterval(start: .now, duration: 86400)
+        let days = dayTotals(sessions, in: iv)
+        let total = days.reduce(0) { $0 + $1.hours }
+        let worn = days.filter { $0.hours > 0 }
+        let inRange = sessions.filter { $0.endedAt != nil && iv.contains($0.startedAt) }
+        let longest = inRange.map(\.duration).max() ?? 0
+        let over = inRange.filter { $0.duration > Double(limit) * 3600 }.count
+        let avg = worn.isEmpty ? 0 : total / Double(worn.count)
+        let peak = (days.map(\.hours).max() ?? 0) + 1
+
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                PeriodBar(period: $period, anchor: $anchor, options: [.week, .month])
+
+                LazyVGrid(
+                    columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 3),
+                    spacing: 12
+                ) {
+                    StatTile(title: "Total worn", value: hm(total))
+                    StatTile(title: "Days worn", value: "\(worn.count) of \(days.count)")
+                    StatTile(title: "Avg per day worn", value: hm(avg))
+                    StatTile(title: "Longest session", value: hm(longest / 3600))
+                    StatTile(title: "Sessions", value: "\(inRange.count)")
+                    StatTile(
+                        title: "Over \(limit)h limit",
+                        value: "\(over)",
+                        tint: over > 0 ? .orange : .primary
+                    )
+                }
+
+                Text("Hours worn per day")
+                    .font(.headline)
+
+                Chart {
+                    ForEach(days) { t in
+                        BarMark(
+                            x: .value("Day", t.day, unit: .day),
+                            y: .value("Hours", t.hours)
+                        )
+                        .foregroundStyle(t.hours > Double(limit) ? Color.red : Color.accentColor)
+                    }
+                    RuleMark(y: .value("Limit", limit))
+                        .lineStyle(StrokeStyle(lineWidth: 1, dash: [4]))
+                        .foregroundStyle(.secondary)
+                        .annotation(position: .top, alignment: .trailing) {
+                            Text("limit \(limit)h")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                }
+                .chartXScale(domain: iv.start...iv.end)
+                .chartYScale(domain: 0...max(Double(limit) + 2, peak))
+                .chartXAxis {
+                    AxisMarks(values: .stride(by: .day, count: period == .week ? 1 : 5)) { _ in
+                        AxisGridLine()
+                        AxisValueLabel(
+                            format: period == .week
+                                ? .dateTime.weekday(.abbreviated)
+                                : .dateTime.day()
+                        )
+                    }
+                }
+                .frame(height: 260)
+            }
+            .padding(24)
+        }
+    }
+}
+
 struct MenuLabel: View {
     @Environment(SyncService.self) private var sync
 
-    private var icon: NSImage {
+    private static let icon: NSImage = {
         let base = NSImage(named: "MenuIcon")
             ?? NSImage(systemSymbolName: "eye", accessibilityDescription: nil)!
         let img = (base.copy() as? NSImage) ?? base
         let h: CGFloat = 18
-        let w = h * img.size.width / max(img.size.height, 1)
-        img.size = NSSize(width: w, height: h)
+        img.size = NSSize(width: h * img.size.width / max(img.size.height, 1), height: h)
         img.isTemplate = true
         return img
-    }
+    }()
 
     var body: some View {
         HStack(spacing: 4) {
-            Image(nsImage: icon)
+            Image(nsImage: Self.icon)
             Text(sync.menuTitle)
         }
     }
@@ -261,178 +812,5 @@ struct MenuContent: View {
         }
         .padding()
         .frame(width: 240)
-    }
-}
-
-struct StatTile: View {
-    let title: String
-    let value: String
-    var tint: Color = .primary
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(.title3.weight(.semibold).monospacedDigit())
-                .foregroundStyle(tint)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
-        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
-    }
-}
-
-struct HistoryTab: View {
-    @Environment(SyncService.self) private var sync
-    let sessions: [WearSession]
-    let limit: Int
-
-    private var finished: [WearSession] { sessions.filter { $0.endedAt != nil } }
-
-    var body: some View {
-        if finished.isEmpty {
-            ContentUnavailableView(
-                "No sessions yet",
-                systemImage: "eye",
-                description: Text("Finished wear sessions show up here.")
-            )
-        } else {
-            List(finished) { s in
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(s.startedAt.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated)))
-                        Text(s.startedAt.formatted(date: .omitted, time: .shortened)
-                             + " - "
-                             + (s.endedAt ?? .now).formatted(date: .omitted, time: .shortened))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    if s.duration > Double(limit) * 3600 {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange)
-                    }
-                    Text(hm(s.duration / 3600))
-                        .monospacedDigit()
-                }
-                .contextMenu {
-                    Button("Delete", role: .destructive) { sync.delete(s) }
-                }
-            }
-        }
-    }
-}
-
-struct ReportsTab: View {
-    let sessions: [WearSession]
-    let limit: Int
-    @State private var range = 14
-
-    var body: some View {
-        let totals = dayTotals(sessions, days: range)
-        let total = totals.reduce(0) { $0 + $1.hours }
-        let worn = totals.filter { $0.hours > 0 }
-        let rangeStart = totals.first?.day ?? .now
-        let inRange = sessions.filter { $0.endedAt != nil && $0.startedAt >= rangeStart }
-        let longest = inRange.map(\.duration).max() ?? 0
-        let over = inRange.filter { $0.duration > Double(limit) * 3600 }.count
-        let avg = worn.isEmpty ? 0 : total / Double(worn.count)
-        let peak = (totals.map(\.hours).max() ?? 0) + 1
-
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                Picker("Range", selection: $range) {
-                    Text("7 days").tag(7)
-                    Text("14 days").tag(14)
-                    Text("30 days").tag(30)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: 260)
-
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 3), spacing: 12) {
-                    StatTile(title: "Total worn", value: hm(total))
-                    StatTile(title: "Days worn", value: "\(worn.count) of \(range)")
-                    StatTile(title: "Avg per day worn", value: hm(avg))
-                    StatTile(title: "Longest session", value: hm(longest / 3600))
-                    StatTile(title: "Sessions", value: "\(inRange.count)")
-                    StatTile(title: "Over \(limit)h limit", value: "\(over)", tint: over > 0 ? .orange : .primary)
-                }
-
-                Text("Hours worn per day")
-                    .font(.headline)
-
-                Chart {
-                    ForEach(totals) { t in
-                        BarMark(
-                            x: .value("Day", t.day, unit: .day),
-                            y: .value("Hours", t.hours)
-                        )
-                        .foregroundStyle(t.hours > Double(limit) ? Color.red : Color.accentColor)
-                    }
-                    RuleMark(y: .value("Limit", limit))
-                        .lineStyle(StrokeStyle(lineWidth: 1, dash: [4]))
-                        .foregroundStyle(.secondary)
-                        .annotation(position: .top, alignment: .trailing) {
-                            Text("limit \(limit)h")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                }
-                .chartYScale(domain: 0...max(Double(limit) + 2, peak))
-                .chartXAxis {
-                    AxisMarks(values: .stride(by: .day, count: range == 7 ? 1 : (range == 14 ? 2 : 5))) { _ in
-                        AxisGridLine()
-                        AxisValueLabel(format: .dateTime.month(.abbreviated).day())
-                    }
-                }
-                .frame(height: 240)
-            }
-            .padding(24)
-        }
-    }
-}
-
-struct LoginSheet: View {
-    @Environment(AuthStore.self) private var auth
-    @Environment(SyncService.self) private var sync
-    @Environment(\.dismiss) private var dismiss
-    @State private var email = ""
-    @State private var password = ""
-
-    var body: some View {
-        VStack(spacing: 14) {
-            Text("Sign in to sync")
-                .font(.headline)
-            TextField("Email", text: $email)
-                .textFieldStyle(.roundedBorder)
-            SecureField("Password", text: $password)
-                .textFieldStyle(.roundedBorder)
-            if let e = auth.errorMessage {
-                Text(e)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-            }
-            HStack {
-                Button("Not now") { dismiss() }
-                Spacer()
-                Button("Sign in") {
-                    Task {
-                        await auth.signIn(email: email, password: password)
-                        if auth.isLoggedIn {
-                            dismiss()
-                            await sync.sync()
-                        }
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.defaultAction)
-            }
-        }
-        .padding(24)
-        .frame(width: 320)
-        .onAppear { auth.errorMessage = nil }
     }
 }

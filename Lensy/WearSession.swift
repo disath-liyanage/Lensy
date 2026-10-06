@@ -80,9 +80,12 @@ final class AuthStore {
     var isLoggedIn = false
     var isLoading = true
     var errorMessage: String?
+    var email: String?
 
     func restore() async {
-        isLoggedIn = supabase.auth.currentSession != nil
+        let session = supabase.auth.currentSession
+        isLoggedIn = session != nil
+        email = session?.user.email
         isLoading = false
     }
 
@@ -90,15 +93,8 @@ final class AuthStore {
         do {
             try await supabase.auth.signIn(email: email, password: password)
             isLoggedIn = true
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
-
-    func signUp(email: String, password: String) async {
-        do {
-            try await supabase.auth.signUp(email: email, password: password)
-            await signIn(email: email, password: password)
+            self.email = supabase.auth.currentSession?.user.email ?? email
+            errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -107,6 +103,7 @@ final class AuthStore {
     func signOut() async {
         try? await supabase.auth.signOut()
         isLoggedIn = false
+        email = nil
     }
 }
 
@@ -115,11 +112,12 @@ final class SyncService {
     var activeStartedAt: Date?
     var status = ""
     var menuTitle = ""
-    @ObservationIgnored private var ticker: Timer?
 
     @ObservationIgnored private let container: ModelContainer
     @ObservationIgnored private var isSyncing = false
     @ObservationIgnored private var syncAgain = false
+    @ObservationIgnored private var lastSync = Date.distantPast
+    @ObservationIgnored private var ticker: Timer?
 
     init(container: ModelContainer) {
         self.container = container
@@ -147,8 +145,12 @@ final class SyncService {
     }
 
     func refreshActive() {
-        activeStartedAt = fetchActive()?.startedAt
-        UserDefaults.standard.set(activeStartedAt != nil, forKey: "timerRunning")
+        let current = fetchActive()?.startedAt
+        if current != activeStartedAt { activeStartedAt = current }
+        let running = current != nil
+        if UserDefaults.standard.bool(forKey: "timerRunning") != running {
+            UserDefaults.standard.set(running, forKey: "timerRunning")
+        }
         updateTicker()
     }
 
@@ -156,7 +158,7 @@ final class SyncService {
         guard activeStartedAt != nil else {
             ticker?.invalidate()
             ticker = nil
-            menuTitle = ""
+            if menuTitle != "" { menuTitle = "" }
             return
         }
         tick()
@@ -175,20 +177,12 @@ final class SyncService {
         if text != menuTitle { menuTitle = text }
     }
 
-    func delete(_ s: WearSession) {
-        s.deletedAt = .now
-        s.touch()
-        try? context.save()
-        refreshActive()
-        Task { await sync() }
-    }
-
     func start() {
         guard fetchActive() == nil else { return }
         context.insert(WearSession())
         try? context.save()
         refreshActive()
-        Task { await sync() }
+        Task { await sync(force: true) }
     }
 
     func stop() {
@@ -197,11 +191,50 @@ final class SyncService {
         s.touch()
         try? context.save()
         refreshActive()
-        Task { await sync() }
+        Task { await sync(force: true) }
     }
 
-    func sync() async {
+    func delete(_ s: WearSession) {
+        s.deletedAt = .now
+        s.touch()
+        try? context.save()
+        refreshActive()
+        Task { await sync(force: true) }
+    }
+
+    func save(_ existing: WearSession?, start: Date, end: Date?, note: String) {
+        let s: WearSession
+        if let existing {
+            s = existing
+        } else {
+            s = WearSession(startedAt: start)
+            context.insert(s)
+        }
+        s.startedAt = start
+        s.endedAt = end
+        s.note = note
+        s.touch()
+        try? context.save()
+        refreshActive()
+        Task { await sync(force: true) }
+    }
+
+    func unsyncedCount() -> Int {
+        let d = FetchDescriptor<WearSession>(predicate: #Predicate { $0.needsSync == true })
+        return (try? context.fetchCount(d)) ?? 0
+    }
+
+    func wipeLocal() {
+        try? context.delete(model: WearSession.self)
+        try? context.save()
+        status = ""
+        lastSync = .distantPast
+        refreshActive()
+    }
+
+    func sync(force: Bool = false) async {
         guard supabase.auth.currentSession != nil else { return }
+        if !force && Date.now.timeIntervalSince(lastSync) < 20 { return }
         if isSyncing {
             syncAgain = true
             return
@@ -216,11 +249,12 @@ final class SyncService {
             print("SYNC ERROR:", error)
             status = "Sync failed: \(error)"
         }
+        lastSync = .now
         isSyncing = false
         refreshActive()
         if syncAgain {
             syncAgain = false
-            await sync()
+            await sync(force: true)
         }
     }
 
@@ -304,4 +338,5 @@ final class SyncService {
             }
             try context.save()
         }
-    }}
+    }
+}
