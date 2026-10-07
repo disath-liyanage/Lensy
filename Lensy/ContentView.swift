@@ -89,6 +89,14 @@ private func timeRange(_ s: WearSession) -> String {
         + (days > 0 ? " (+\(days)d)" : "")
 }
 
+extension View {
+    func card(padding: CGFloat = 12) -> some View {
+        self
+            .padding(padding)
+            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
 struct PillBar<Option: Hashable>: View {
     let options: [Option]
     @Binding var selection: Option
@@ -209,7 +217,7 @@ struct ContentView: View {
             }
         }
         .toolbar(removing: .title)
-        .frame(minWidth: 640, minHeight: 700)
+        .frame(minWidth: 680, minHeight: 760)
         .task {
             sync.refreshActive()
             await auth.restore()
@@ -244,6 +252,9 @@ struct ContentView: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 6)
         }
+        .overlay(alignment: .bottom) { undoToast }
+        .animation(.snappy, value: sync.lastDeleted == nil)
+        .background { shortcuts }
         .toolbar {
             ToolbarItem(placement: .principal) {
                 PillBar(
@@ -278,11 +289,44 @@ struct ContentView: View {
         }
     }
 
+    private var shortcuts: some View {
+        Group {
+            Button("Timer") { tab = .timer }
+                .keyboardShortcut("1", modifiers: .command)
+            Button("History") { tab = .history }
+                .keyboardShortcut("2", modifiers: .command)
+            Button("Reports") { tab = .reports }
+                .keyboardShortcut("3", modifiers: .command)
+        }
+        .opacity(0)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private var undoToast: some View {
+        if sync.lastDeleted != nil {
+            HStack(spacing: 12) {
+                Image(systemName: "trash")
+                Text("Session deleted")
+                Button("Undo") { sync.undoDelete() }
+                    .buttonStyle(.link)
+            }
+            .font(.callout)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 10)
+            .glassEffect(.regular, in: .capsule)
+            .padding(.bottom, 52)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
+    }
+
     private var accountMenu: some View {
         Menu {
             if let email = auth.email { Text(email) }
             Divider()
             Button("Settings...") { showSettings = true }
+                .keyboardShortcut(",", modifiers: .command)
             Divider()
             Button("Sign out", role: .destructive) {
                 Task { await requestSignOut() }
@@ -345,6 +389,7 @@ struct LoginView: View {
     @State private var email = ""
     @State private var password = ""
     @State private var busy = false
+    @FocusState private var emailFocused: Bool
 
     var body: some View {
         VStack(spacing: 18) {
@@ -359,6 +404,7 @@ struct LoginView: View {
             VStack(spacing: 10) {
                 TextField("Email", text: $email)
                     .textFieldStyle(.roundedBorder)
+                    .focused($emailFocused)
                 SecureField("Password", text: $password)
                     .textFieldStyle(.roundedBorder)
             }
@@ -394,7 +440,10 @@ struct LoginView: View {
             .disabled(busy || email.isEmpty || password.isEmpty)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear { auth.errorMessage = nil }
+        .onAppear {
+            auth.errorMessage = nil
+            emailFocused = true
+        }
     }
 }
 
@@ -406,6 +455,7 @@ struct TimerTab: View {
     let limit: Int
 
     @State private var restWarning: Int?
+    @State private var editingActive: WearSession?
 
     private func weeklyWarning() -> Int? {
         let cal = mondayCalendar
@@ -415,12 +465,28 @@ struct TimerTab: View {
         return days.count >= maxDays ? days.count : nil
     }
 
+    private var statTiles: some View {
+        let cal = mondayCalendar
+        let weekIV = interval(.week, anchor: .now) ?? DateInterval(start: .now, duration: 86400)
+        let days = dayTotals(sessions, in: weekIV)
+        let week = days.reduce(0) { $0 + $1.hours }
+        let worn = days.filter { $0.hours >= 1.0 / 60 }
+        let avg = worn.isEmpty ? 0 : week / Double(worn.count)
+        let today = days.first { cal.isDateInToday($0.day) }?.hours ?? 0
+
+        return HStack(spacing: 12) {
+            StatTile(title: "Today", value: hm(today))
+            StatTile(title: "Week total", value: hm(week))
+            StatTile(title: "Avg per day worn", value: hm(avg))
+        }
+    }
+
     var body: some View {
-        VStack(spacing: 22) {
+        VStack(spacing: 18) {
             Spacer(minLength: 0)
 
             if let start = sync.activeStartedAt {
-                LiveRing(start: start, limit: limit)
+                LiveRing(start: start, limit: limit, size: 240)
                 Text("Put on " + start.formatted(date: .omitted, time: .shortened))
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -429,7 +495,8 @@ struct TimerTab: View {
                     progress: 0,
                     color: .secondary,
                     title: "Lenses out",
-                    subtitle: "Press Start when you put them in"
+                    subtitle: "Press Start when you put them in",
+                    size: 240
                 )
             }
 
@@ -446,36 +513,34 @@ struct TimerTab: View {
                     sync.activeStartedAt == nil ? "Start" : "Stop",
                     systemImage: sync.activeStartedAt == nil ? "play.fill" : "stop.fill"
                 )
-                .frame(width: 160)
+                .frame(width: 150)
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.glassProminent)
             .controlSize(.large)
             .tint(sync.activeStartedAt == nil ? Color.accentColor : Color.red)
 
             if sync.activeStartedAt == nil {
                 Button("Already wearing them?") { notifier.askWornTime = true }
                     .buttonStyle(.link)
+            } else {
+                Button("Adjust start time") {
+                    editingActive = sessions.first { $0.endedAt == nil }
+                }
+                .buttonStyle(.link)
             }
 
             TimelineView(.periodic(from: .now, by: 30)) { _ in
-                let cal = mondayCalendar
-                let weekIV = interval(.week, anchor: .now) ?? DateInterval(start: .now, duration: 86400)
-                let days = dayTotals(sessions, in: weekIV)
-                let week = days.reduce(0) { $0 + $1.hours }
-                let worn = days.filter { $0.hours >= 1.0 / 60 }
-                let avg = worn.isEmpty ? 0 : week / Double(worn.count)
-                let today = days.first { cal.isDateInToday($0.day) }?.hours ?? 0
-
-                HStack(spacing: 12) {
-                    StatTile(title: "Today", value: hm(today))
-                    StatTile(title: "This week", value: hm(week))
-                    StatTile(title: "Avg per day worn", value: hm(avg))
+                VStack(spacing: 12) {
+                    WeekStrip(sessions: sessions, maxDays: maxDays)
+                    statTiles
                 }
             }
 
             Spacer(minLength: 0)
         }
-        .padding(24)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 16)
+        .sheet(item: $editingActive) { SessionEditor(session: $0) }
         .alert(
             "Take a rest day?",
             isPresented: Binding(
@@ -488,6 +553,53 @@ struct TimerTab: View {
         } message: {
             Text("You've already worn your lenses on \(restWarning ?? maxDays) of 7 days this week, and your limit is \(maxDays). A rest day helps keep your eyes healthy.")
         }
+    }
+}
+
+struct WeekStrip: View {
+    let sessions: [WearSession]
+    let maxDays: Int
+
+    var body: some View {
+        let cal = mondayCalendar
+        let week = cal.dateInterval(of: .weekOfYear, for: .now)
+            ?? DateInterval(start: .now, duration: 7 * 86400)
+        let worn = wornDays(sessions, in: week)
+        let days = (0..<7).compactMap { cal.date(byAdding: .day, value: $0, to: week.start) }
+        let count = worn.count
+
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("This week")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Text("\(count) of \(maxDays) days")
+                    .font(.subheadline.monospacedDigit())
+                    .foregroundStyle(count >= maxDays ? Color.orange : Color.secondary)
+            }
+            HStack(spacing: 0) {
+                ForEach(days, id: \.self) { day in
+                    let isWorn = worn.contains(day)
+                    let isToday = cal.isDateInToday(day)
+                    VStack(spacing: 6) {
+                        Text(day.formatted(.dateTime.weekday(.narrow)))
+                            .font(.caption2)
+                            .foregroundStyle(isToday ? Color.primary : Color.secondary)
+                        Circle()
+                            .fill(isWorn ? Color.green : Color.clear)
+                            .overlay(
+                                Circle().strokeBorder(
+                                    isToday ? Color.accentColor : Color.secondary.opacity(0.35),
+                                    lineWidth: isToday ? 2 : 1
+                                )
+                            )
+                            .frame(width: 20, height: 20)
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+            }
+        }
+        .card(padding: 14)
     }
 }
 
@@ -530,9 +642,12 @@ struct RingView: View {
                 .trim(from: 0, to: min(max(progress, 0), 1))
                 .stroke(color, style: StrokeStyle(lineWidth: size * 0.06, lineCap: .round))
                 .rotationEffect(.degrees(-90))
+                .animation(.snappy, value: progress)
             VStack(spacing: 4) {
                 Text(title)
                     .font(.system(size: size * 0.146, weight: .semibold, design: .rounded).monospacedDigit())
+                    .contentTransition(.numericText())
+                    .animation(.snappy, value: title)
                     .minimumScaleFactor(0.5)
                     .lineLimit(1)
                 Text(subtitle)
@@ -544,6 +659,8 @@ struct RingView: View {
             .padding(.horizontal, size * 0.14)
         }
         .frame(width: size, height: size)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(title + ", " + subtitle.replacingOccurrences(of: "\n", with: ", "))
     }
 }
 
@@ -560,10 +677,11 @@ struct StatTile: View {
             Text(value)
                 .font(.title3.weight(.semibold).monospacedDigit())
                 .foregroundStyle(tint)
+                .contentTransition(.numericText())
+                .animation(.snappy, value: value)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
-        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
+        .card()
     }
 }
 
@@ -718,7 +836,6 @@ struct HistoryTab: View {
     @State private var anchor = Date.now
     @State private var editing: WearSession?
     @State private var adding = false
-    @State private var toDelete: WearSession?
 
     var body: some View {
         let iv = interval(period, anchor: anchor)
@@ -747,16 +864,38 @@ struct HistoryTab: View {
             }
 
             if visible.isEmpty {
-                ContentUnavailableView(
-                    "No sessions",
-                    systemImage: "eye",
-                    description: Text("Nothing recorded in this period.")
-                )
+                ContentUnavailableView {
+                    Label("No sessions", systemImage: "eye")
+                } description: {
+                    Text("Nothing recorded in this period.")
+                } actions: {
+                    Button("Add a session") { adding = true }
+                }
             } else {
                 List {
                     ForEach(groups) { g in
                         Section {
-                            ForEach(g.items) { s in row(s) }
+                            ForEach(g.items) { s in
+                                HistoryRow(
+                                    session: s,
+                                    limit: limit,
+                                    onEdit: { editing = s },
+                                    onDelete: { sync.delete(s) }
+                                )
+                                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                    Button(role: .destructive) {
+                                        sync.delete(s)
+                                    } label: {
+                                        Label("Delete", systemImage: "trash")
+                                    }
+                                    Button {
+                                        editing = s
+                                    } label: {
+                                        Label("Edit", systemImage: "pencil")
+                                    }
+                                    .tint(.blue)
+                                }
+                            }
                         } header: {
                             HStack {
                                 Text(g.day.formatted(.dateTime.weekday(.wide).day().month(.abbreviated)))
@@ -770,29 +909,21 @@ struct HistoryTab: View {
                 .listStyle(.inset)
             }
         }
-        .padding([.horizontal, .top], 20)
+        .padding([.horizontal, .top], 24)
         .sheet(item: $editing) { SessionEditor(session: $0) }
         .sheet(isPresented: $adding) { SessionEditor(session: nil) }
-        .confirmationDialog(
-            "Delete this session?",
-            isPresented: Binding(
-                get: { toDelete != nil },
-                set: { if !$0 { toDelete = nil } }
-            ),
-            titleVisibility: .visible,
-            presenting: toDelete
-        ) { s in
-            Button("Delete", role: .destructive) {
-                sync.delete(s)
-                toDelete = nil
-            }
-            Button("Cancel", role: .cancel) { toDelete = nil }
-        } message: { s in
-            Text(s.startedAt.formatted(date: .abbreviated, time: .shortened) + ", " + hm(s.duration / 3600))
-        }
     }
+}
 
-    private func row(_ s: WearSession) -> some View {
+struct HistoryRow: View {
+    let session: WearSession
+    let limit: Int
+    let onEdit: () -> Void
+    let onDelete: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        let s = session
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(timeRange(s))
@@ -819,23 +950,30 @@ struct HistoryTab: View {
             Text(hm(s.duration / 3600))
                 .monospacedDigit()
                 .frame(width: 76, alignment: .trailing)
-            Button {
-                editing = s
-            } label: {
-                Image(systemName: "pencil")
+            HStack(spacing: 8) {
+                Button(action: onEdit) {
+                    Image(systemName: "pencil")
+                }
+                .buttonStyle(.borderless)
+                .help("Edit")
+                Button(action: onDelete) {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.red)
+                .help("Delete")
             }
-            .buttonStyle(.borderless)
-            .help("Edit")
-            Button {
-                toDelete = s
-            } label: {
-                Image(systemName: "trash")
-            }
-            .buttonStyle(.borderless)
-            .foregroundStyle(.red)
-            .help("Delete")
+            .opacity(hovering ? 1 : 0.35)
+            .animation(.snappy(duration: 0.15), value: hovering)
         }
         .padding(.vertical, 2)
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .onTapGesture(count: 2, perform: onEdit)
+        .contextMenu {
+            Button("Edit", action: onEdit)
+            Button("Delete", role: .destructive, action: onDelete)
+        }
     }
 }
 
@@ -908,8 +1046,10 @@ struct ReportsTab: View {
 
     @State private var period: Period = .week
     @State private var anchor = Date.now
+    @State private var selectedDay: Date?
 
     var body: some View {
+        let cal = mondayCalendar
         let iv = interval(period, anchor: anchor) ?? DateInterval(start: .now, duration: 86400)
         let days = dayTotals(sessions, in: iv)
         let total = days.reduce(0) { $0 + $1.hours }
@@ -920,6 +1060,9 @@ struct ReportsTab: View {
         let avg = worn.isEmpty ? 0 : total / Double(worn.count)
         let peak = (days.map(\.hours).max() ?? 0) + 1
         let tooManyDays = period == .week && worn.count >= maxDays
+        let selected = selectedDay.flatMap { sel in
+            days.first { cal.isDate($0.day, inSameDayAs: sel) }
+        }
 
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
@@ -955,6 +1098,7 @@ struct ReportsTab: View {
                             y: .value("Hours", t.hours)
                         )
                         .foregroundStyle(t.hours > Double(limit) ? Color.red : Color.accentColor)
+                        .opacity(selected == nil || selected?.day == t.day ? 1 : 0.45)
                     }
                     RuleMark(y: .value("Limit", limit))
                         .lineStyle(StrokeStyle(lineWidth: 1, dash: [4]))
@@ -964,7 +1108,27 @@ struct ReportsTab: View {
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
+                    if let s = selected {
+                        RuleMark(x: .value("Selected", s.day, unit: .day))
+                            .foregroundStyle(.secondary.opacity(0.35))
+                            .annotation(
+                                position: .top,
+                                spacing: 4,
+                                overflowResolution: .init(x: .fit(to: .chart), y: .disabled)
+                            ) {
+                                VStack(spacing: 2) {
+                                    Text(s.day.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated)))
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                    Text(hm(s.hours))
+                                        .font(.caption.weight(.semibold))
+                                }
+                                .padding(6)
+                                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                            }
+                    }
                 }
+                .chartXSelection(value: $selectedDay)
                 .chartXScale(domain: iv.start...iv.end)
                 .chartYScale(domain: 0...max(Double(limit) + 2, peak))
                 .chartXAxis {
@@ -978,6 +1142,12 @@ struct ReportsTab: View {
                     }
                 }
                 .frame(height: 260)
+                .overlay {
+                    if total == 0 {
+                        Text("No wear recorded in this period")
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
             .padding(24)
         }

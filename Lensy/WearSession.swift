@@ -325,7 +325,9 @@ final class SyncService {
     var menuTitle = ""
     var state: SyncState = .idle
     var pending = 0
-
+    var lastDeleted: WearSession?
+    
+    @ObservationIgnored private var undoTask: Task<Void, Never>?
     @ObservationIgnored weak var notifier: NotificationService?
     @ObservationIgnored private let container: ModelContainer
     @ObservationIgnored private var isSyncing = false
@@ -453,6 +455,25 @@ final class SyncService {
         s.deletedAt = .now
         s.touch()
         try? context.save()
+        refreshActive()
+        Task { await sync(force: true) }
+
+        lastDeleted = s
+        undoTask?.cancel()
+        undoTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(6))
+            guard !Task.isCancelled else { return }
+            self?.lastDeleted = nil
+        }
+    }
+
+    func undoDelete() {
+        guard let s = lastDeleted else { return }
+        s.deletedAt = nil
+        s.touch()
+        try? context.save()
+        lastDeleted = nil
+        undoTask?.cancel()
         refreshActive()
         Task { await sync(force: true) }
     }
