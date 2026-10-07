@@ -1,6 +1,8 @@
 import Foundation
 import SwiftData
 import Supabase
+import UserNotifications
+import AppKit
 
 nonisolated struct DefaultsStorage: AuthLocalStorage {
     func store(key: String, value: Data) throws {
@@ -75,6 +77,36 @@ nonisolated struct SessionDTO: Codable, Sendable {
     }
 }
 
+var mondayCalendar: Calendar {
+    var c = Calendar.current
+    c.firstWeekday = 2
+    return c
+}
+
+func wornDays(_ sessions: [WearSession], in iv: DateInterval) -> Set<Date> {
+    let cal = mondayCalendar
+    var result = Set<Date>()
+    var day = cal.startOfDay(for: iv.start)
+    while day < iv.end {
+        let next = cal.date(byAdding: .day, value: 1, to: day)!
+        let secs = sessions.reduce(0.0) { acc, s in
+            let a = max(s.startedAt, day)
+            let b = min(s.endedAt ?? .now, next)
+            return acc + max(0, b.timeIntervalSince(a))
+        }
+        if secs >= 60 { result.insert(day) }
+        day = next
+    }
+    return result
+}
+
+enum SyncState: Equatable {
+    case idle
+    case syncing
+    case synced(Date)
+    case failed(String)
+}
+
 @Observable @MainActor
 final class AuthStore {
     var isLoggedIn = false
@@ -108,11 +140,193 @@ final class AuthStore {
 }
 
 @Observable @MainActor
+final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
+    var askWornTime = false
+    var denied = false
+
+    @ObservationIgnored weak var sync: SyncService?
+    @ObservationIgnored private var lastSignature = ""
+    @ObservationIgnored private let center = UNUserNotificationCenter.current()
+
+    override init() {
+        super.init()
+        center.delegate = self
+        let snooze = UNNotificationAction(identifier: "snooze", title: "Snooze", options: [])
+        let wearing = UNNotificationAction(
+            identifier: "alreadyWearing",
+            title: "Already wearing",
+            options: [.foreground]
+        )
+        let out = UNNotificationAction(identifier: "lensesOut", title: "Lenses are out", options: [])
+        center.setNotificationCategories([
+            UNNotificationCategory(identifier: "puton", actions: [wearing, snooze], intentIdentifiers: [], options: []),
+            UNNotificationCategory(identifier: "remove", actions: [snooze, out], intentIdentifiers: [], options: [])
+        ])
+    }
+
+    private var defaults: UserDefaults { .standard }
+    private var limitHours: Int { defaults.object(forKey: "wearLimitHours") as? Int ?? 14 }
+    private var snoozeMinutes: Int { defaults.object(forKey: "snoozeMinutes") as? Int ?? 15 }
+    private var putOnEnabled: Bool { defaults.object(forKey: "putOnReminder") as? Bool ?? true }
+    private var removeEnabled: Bool { defaults.object(forKey: "removeReminder") as? Bool ?? true }
+    private var putOnMinutes: Int { defaults.object(forKey: "putOnMinutes") as? Int ?? 480 }
+
+    func requestAccess() async {
+        _ = try? await center.requestAuthorization(options: [.alert, .sound])
+        await refreshAuthorization()
+    }
+
+    func refreshAuthorization() async {
+        let s = await center.notificationSettings()
+        denied = s.authorizationStatus == .denied
+    }
+
+    func cancelAll() {
+        center.removeAllPendingNotificationRequests()
+        center.removeAllDeliveredNotifications()
+        lastSignature = ""
+    }
+
+    func reschedule(activeStart: Date?, skipDays: Set<Date>, force: Bool = false) {
+        let today = Calendar.current.startOfDay(for: .now).timeIntervalSince1970
+        let skips = skipDays.map { $0.timeIntervalSince1970 }.sorted()
+        let sig = "\(activeStart?.timeIntervalSince1970 ?? 0)|\(limitHours)|\(snoozeMinutes)|\(putOnEnabled)|\(removeEnabled)|\(putOnMinutes)|\(today)|\(skips)"
+        guard force || sig != lastSignature else { return }
+        lastSignature = sig
+
+        let putOnIDs = (0..<14).map { "puton-day-\($0)" }
+        var pending = ["remove-main"] + putOnIDs
+        var delivered: [String]
+        if activeStart == nil {
+            pending.append("remove-snooze")
+            delivered = ["remove-main", "remove-snooze"]
+        } else {
+            pending.append("puton-snooze")
+            delivered = ["puton-snooze"] + putOnIDs
+        }
+        center.removePendingNotificationRequests(withIdentifiers: pending)
+        center.removeDeliveredNotifications(withIdentifiers: delivered)
+
+        if let start = activeStart, removeEnabled {
+            let fire = start.addingTimeInterval(Double(limitHours) * 3600)
+            if fire > Date.now.addingTimeInterval(5) {
+                add(
+                    id: "remove-main",
+                    category: "remove",
+                    title: "Time to take your lenses out",
+                    body: "You've reached your \(limitHours) hour wear time.",
+                    at: fire
+                )
+            }
+        }
+
+        if putOnEnabled {
+            let cal = Calendar.current
+            let startOfToday = cal.startOfDay(for: .now)
+            for offset in 0..<14 {
+                guard let day = cal.date(byAdding: .day, value: offset, to: startOfToday),
+                      !skipDays.contains(day),
+                      let fire = cal.date(byAdding: .minute, value: putOnMinutes, to: day),
+                      fire > Date.now
+                else { continue }
+                add(
+                    id: "puton-day-\(offset)",
+                    category: "puton",
+                    title: "Time to put your lenses in",
+                    body: "Tap Already wearing if they're in already.",
+                    at: fire
+                )
+            }
+        }
+    }
+
+    private func add(id: String, category: String, title: String, body: String, at date: Date) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        content.categoryIdentifier = category
+        let comps = Calendar.current.dateComponents(
+            [.year, .month, .day, .hour, .minute, .second],
+            from: date
+        )
+        let trigger = UNCalendarNotificationTrigger(dateMatching: comps, repeats: false)
+        center.add(UNNotificationRequest(identifier: id, content: content, trigger: trigger))
+    }
+
+    private func fire(category: String, id: String, after seconds: TimeInterval) {
+        let isPutOn = category == "puton"
+        let content = UNMutableNotificationContent()
+        content.title = isPutOn ? "Time to put your lenses in" : "Time to take your lenses out"
+        content.body = isPutOn
+            ? "Tap Already wearing if they're in already."
+            : "You've passed your \(limitHours) hour wear time."
+        content.sound = .default
+        content.categoryIdentifier = category
+        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: max(seconds, 1), repeats: false)
+        center.add(UNNotificationRequest(identifier: id, content: content, trigger: trigger))
+    }
+
+    func snooze(category: String) {
+        fire(
+            category: category,
+            id: category == "puton" ? "puton-snooze" : "remove-snooze",
+            after: Double(snoozeMinutes) * 60
+        )
+    }
+
+    func sendTest(category: String) {
+        fire(category: category, id: "test-\(category)", after: 10)
+    }
+
+    private func bringToFront() {
+        NSApp.activate(ignoringOtherApps: true)
+        if !NSApp.windows.contains(where: { $0.isVisible && $0.canBecomeMain }) {
+            NSWorkspace.shared.open(Bundle.main.bundleURL)
+        }
+    }
+
+    private func handle(action: String, category: String) {
+        switch action {
+        case "snooze":
+            snooze(category: category)
+        case "alreadyWearing":
+            bringToFront()
+            askWornTime = true
+        case "lensesOut":
+            sync?.stop()
+        case UNNotificationDefaultActionIdentifier:
+            bringToFront()
+        default:
+            break
+        }
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification
+    ) async -> UNNotificationPresentationOptions {
+        [.banner, .sound]
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse
+    ) async {
+        let action = response.actionIdentifier
+        let category = response.notification.request.content.categoryIdentifier
+        await handle(action: action, category: category)
+    }
+}
+
+@Observable @MainActor
 final class SyncService {
     var activeStartedAt: Date?
-    var status = ""
     var menuTitle = ""
+    var state: SyncState = .idle
+    var pending = 0
 
+    @ObservationIgnored weak var notifier: NotificationService?
     @ObservationIgnored private let container: ModelContainer
     @ObservationIgnored private var isSyncing = false
     @ObservationIgnored private var syncAgain = false
@@ -124,6 +338,10 @@ final class SyncService {
     }
 
     private var context: ModelContext { container.mainContext }
+
+    private var maxDays: Int {
+        UserDefaults.standard.object(forKey: "maxDaysPerWeek") as? Int ?? 6
+    }
 
     private func dto(_ s: WearSession) -> SessionDTO {
         SessionDTO(
@@ -152,6 +370,43 @@ final class SyncService {
             UserDefaults.standard.set(running, forKey: "timerRunning")
         }
         updateTicker()
+        updatePending()
+        planReminders()
+    }
+
+    func replanReminders() {
+        planReminders()
+    }
+
+    private func updatePending() {
+        let n = unsyncedCount()
+        if n != pending { pending = n }
+    }
+
+    private func planReminders() {
+        guard let notifier else { return }
+        guard supabase.auth.currentSession != nil else {
+            notifier.cancelAll()
+            return
+        }
+        let cal = mondayCalendar
+        let live = ((try? context.fetch(FetchDescriptor<WearSession>())) ?? [])
+            .filter { $0.deletedAt == nil }
+        let today = cal.startOfDay(for: .now)
+
+        var skip = Set<Date>()
+        if live.contains(where: { cal.startOfDay(for: $0.startedAt) == today }) {
+            skip.insert(today)
+        }
+        if let week = cal.dateInterval(of: .weekOfYear, for: .now),
+           wornDays(live, in: week).count >= maxDays {
+            var d = today
+            while d < week.end {
+                skip.insert(d)
+                d = cal.date(byAdding: .day, value: 1, to: d)!
+            }
+        }
+        notifier.reschedule(activeStart: activeStartedAt, skipDays: skip)
     }
 
     private func updateTicker() {
@@ -177,9 +432,9 @@ final class SyncService {
         if text != menuTitle { menuTitle = text }
     }
 
-    func start() {
+    func start(at date: Date = .now) {
         guard fetchActive() == nil else { return }
-        context.insert(WearSession())
+        context.insert(WearSession(startedAt: date))
         try? context.save()
         refreshActive()
         Task { await sync(force: true) }
@@ -227,9 +482,22 @@ final class SyncService {
     func wipeLocal() {
         try? context.delete(model: WearSession.self)
         try? context.save()
-        status = ""
+        state = .idle
         lastSync = .distantPast
         refreshActive()
+    }
+
+    private func friendly(_ error: Error) -> String {
+        if let e = error as? URLError {
+            switch e.code {
+            case .notConnectedToInternet, .networkConnectionLost, .cannotFindHost,
+                 .cannotConnectToHost, .timedOut, .dnsLookupFailed:
+                return "No connection"
+            default:
+                break
+            }
+        }
+        return "Couldn't sync"
     }
 
     func sync(force: Bool = false) async {
@@ -240,14 +508,14 @@ final class SyncService {
             return
         }
         isSyncing = true
-        status = "Syncing..."
+        state = .syncing
         do {
             try await pull()
             try await push()
-            status = "Synced " + Date.now.formatted(date: .omitted, time: .shortened)
+            state = .synced(.now)
         } catch {
             print("SYNC ERROR:", error)
-            status = "Sync failed: \(error)"
+            state = .failed(friendly(error))
         }
         lastSync = .now
         isSyncing = false

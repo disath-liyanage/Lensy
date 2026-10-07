@@ -6,6 +6,7 @@ struct LensyApp: App {
     let container: ModelContainer
     @State private var auth = AuthStore()
     @State private var sync: SyncService
+    @State private var notifier: NotificationService
     @AppStorage("timerRunning") private var timerRunning = false
 
     init() {
@@ -20,9 +21,14 @@ struct LensyApp: App {
             )
         }
         container = c
+
         let s = SyncService(container: c)
+        let n = NotificationService()
+        n.sync = s
+        s.notifier = n
         s.refreshActive()
         _sync = State(initialValue: s)
+        _notifier = State(initialValue: n)
     }
 
     var body: some Scene {
@@ -30,6 +36,7 @@ struct LensyApp: App {
             ContentView()
                 .environment(auth)
                 .environment(sync)
+                .environment(notifier)
         }
         .modelContainer(container)
 
