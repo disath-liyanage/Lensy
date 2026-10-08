@@ -568,34 +568,51 @@ struct TimerTab: View {
 
             if let start = sync.activeStartedAt {
                 LiveRing(start: start, limit: limit, size: 240, showRemoveAt: false)
-
-                HStack(spacing: 16) {
+                HStack(spacing: 0) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Put on").font(.caption2).foregroundStyle(.secondary)
-                        Text(whenText(start)).font(.callout.weight(.medium))
+                        Text("Put on")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Text(whenText(start))
+                            .font(.callout.weight(.medium))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
                     }
-                    Spacer()
-                    Divider().frame(height: 24)
-                    Spacer()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    
+                    Divider()
+                        .frame(height: 28)
+                        .padding(.horizontal, 16)
+                    
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Remove at").font(.caption2).foregroundStyle(.secondary)
-                        Text(whenText(start.addingTimeInterval(Double(limit) * 3600))).font(.callout.weight(.medium))
+                        Text("Remove at")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Text(whenText(start.addingTimeInterval(Double(limit) * 3600)))
+                            .font(.callout.weight(.medium))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
                     }
-                    Spacer()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    
                     Button {
                         adjusting = true
                     } label: {
-                        Image(systemName: "pencil").font(.callout)
+                        Image(systemName: "pencil")
+                            .font(.callout)
+                            .foregroundStyle(.primary)
+                            .frame(width: 34, height: 34)
+                            .background(Color.primary.opacity(0.08), in: Circle())
                     }
                     .buttonStyle(.plain)
-                    .padding(8)
-                    .background(.primary.opacity(0.1), in: Circle())
+                    .padding(.leading, 12)
                     .help("Adjust start time")
                 }
-                .padding(.horizontal, 20)
+                .padding(.leading, 24)
+                .padding(.trailing, 14)
                 .padding(.vertical, 12)
                 .background(.quaternary.opacity(0.5), in: Capsule())
-                .frame(maxWidth: 340)
+                .frame(maxWidth: 400)
 
             } else {
                 RingView(
