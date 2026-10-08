@@ -26,6 +26,7 @@ struct LensyApp: App {
         let n = NotificationService()
         n.sync = s
         s.notifier = n
+        SyncService.shared = s
         s.refreshActive()
         _sync = State(initialValue: s)
         _notifier = State(initialValue: n)

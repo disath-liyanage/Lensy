@@ -3,6 +3,7 @@ import SwiftData
 import Supabase
 import UserNotifications
 import AppKit
+import AppIntents
 
 nonisolated struct DefaultsStorage: AuthLocalStorage {
     func store(key: String, value: Data) throws {
@@ -196,7 +197,7 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
 
         let putOnIDs = (0..<14).map { "puton-day-\($0)" }
         var pending = ["remove-main"] + putOnIDs
-        var delivered: [String]
+        let delivered: [String]
         if activeStart == nil {
             pending.append("remove-snooze")
             delivered = ["remove-main", "remove-snooze"]
@@ -208,14 +209,14 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
         center.removeDeliveredNotifications(withIdentifiers: delivered)
 
         if let start = activeStart, removeEnabled {
-            let fire = start.addingTimeInterval(Double(limitHours) * 3600)
-            if fire > Date.now.addingTimeInterval(5) {
+            let fireAt = start.addingTimeInterval(Double(limitHours) * 3600)
+            if fireAt > Date.now.addingTimeInterval(5) {
                 add(
                     id: "remove-main",
                     category: "remove",
                     title: "Time to take your lenses out",
                     body: "You've reached your \(limitHours) hour wear time.",
-                    at: fire
+                    at: fireAt
                 )
             }
         }
@@ -226,15 +227,15 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
             for offset in 0..<14 {
                 guard let day = cal.date(byAdding: .day, value: offset, to: startOfToday),
                       !skipDays.contains(day),
-                      let fire = cal.date(byAdding: .minute, value: putOnMinutes, to: day),
-                      fire > Date.now
+                      let fireAt = cal.date(byAdding: .minute, value: putOnMinutes, to: day),
+                      fireAt > Date.now
                 else { continue }
                 add(
                     id: "puton-day-\(offset)",
                     category: "puton",
                     title: "Time to put your lenses in",
                     body: "Tap Already wearing if they're in already.",
-                    at: fire
+                    at: fireAt
                 )
             }
         }
@@ -254,7 +255,7 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
         center.add(UNNotificationRequest(identifier: id, content: content, trigger: trigger))
     }
 
-    private func fire(category: String, id: String, after seconds: TimeInterval) {
+    private func scheduleIn(category: String, id: String, seconds: TimeInterval) {
         let isPutOn = category == "puton"
         let content = UNMutableNotificationContent()
         content.title = isPutOn ? "Time to put your lenses in" : "Time to take your lenses out"
@@ -268,15 +269,15 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
     }
 
     func snooze(category: String) {
-        fire(
+        scheduleIn(
             category: category,
             id: category == "puton" ? "puton-snooze" : "remove-snooze",
-            after: Double(snoozeMinutes) * 60
+            seconds: Double(snoozeMinutes) * 60
         )
     }
 
     func sendTest(category: String) {
-        fire(category: category, id: "test-\(category)", after: 10)
+        scheduleIn(category: category, id: "test-\(category)", seconds: 10)
     }
 
     private func bringToFront() {
@@ -321,19 +322,21 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
 
 @Observable @MainActor
 final class SyncService {
+    static var shared: SyncService?
+
     var activeStartedAt: Date?
     var menuTitle = ""
     var state: SyncState = .idle
     var pending = 0
     var lastDeleted: WearSession?
-    
-    @ObservationIgnored private var undoTask: Task<Void, Never>?
+
     @ObservationIgnored weak var notifier: NotificationService?
     @ObservationIgnored private let container: ModelContainer
     @ObservationIgnored private var isSyncing = false
     @ObservationIgnored private var syncAgain = false
     @ObservationIgnored private var lastSync = Date.distantPast
     @ObservationIgnored private var ticker: Timer?
+    @ObservationIgnored private var undoTask: Task<Void, Never>?
 
     init(container: ModelContainer) {
         self.container = container
@@ -344,6 +347,8 @@ final class SyncService {
     private var maxDays: Int {
         UserDefaults.standard.object(forKey: "maxDaysPerWeek") as? Int ?? 6
     }
+
+    var signedIn: Bool { supabase.auth.currentSession != nil }
 
     private func dto(_ s: WearSession) -> SessionDTO {
         SessionDTO(
@@ -362,6 +367,24 @@ final class SyncService {
             sortBy: [SortDescriptor(\.startedAt)]
         )
         return (try? context.fetch(d))?.first
+    }
+
+    private func liveSessions() -> [WearSession] {
+        ((try? context.fetch(FetchDescriptor<WearSession>())) ?? [])
+            .filter { $0.deletedAt == nil }
+    }
+
+    func daysWornThisWeek() -> Int {
+        guard let week = mondayCalendar.dateInterval(of: .weekOfYear, for: .now) else { return 0 }
+        return wornDays(liveSessions(), in: week).count
+    }
+
+    func weeklyWarningCount() -> Int? {
+        let cal = mondayCalendar
+        guard let week = cal.dateInterval(of: .weekOfYear, for: .now) else { return nil }
+        let days = wornDays(liveSessions(), in: week)
+        if days.contains(cal.startOfDay(for: .now)) { return nil }
+        return days.count >= maxDays ? days.count : nil
     }
 
     func refreshActive() {
@@ -392,8 +415,7 @@ final class SyncService {
             return
         }
         let cal = mondayCalendar
-        let live = ((try? context.fetch(FetchDescriptor<WearSession>())) ?? [])
-            .filter { $0.deletedAt == nil }
+        let live = liveSessions()
         let today = cal.startOfDay(for: .now)
 
         var skip = Set<Date>()
@@ -547,6 +569,14 @@ final class SyncService {
         }
     }
 
+    func waitForSync(timeout: TimeInterval = 8) async {
+        let deadline = Date.now.addingTimeInterval(timeout)
+        await sync(force: true)
+        while (isSyncing || syncAgain) && Date.now < deadline {
+            try? await Task.sleep(for: .milliseconds(150))
+        }
+    }
+
     private func pull() async throws {
         let rows: [SessionDTO] = try await supabase
             .from("wear_sessions")
@@ -627,5 +657,162 @@ final class SyncService {
             }
             try context.save()
         }
+    }
+}
+
+private func wearLimitHours() -> Int {
+    UserDefaults.standard.object(forKey: "wearLimitHours") as? Int ?? 14
+}
+
+private func spoken(_ seconds: TimeInterval) -> String {
+    let total = max(0, Int(seconds / 60))
+    let h = total / 60
+    let m = total % 60
+    let hours = "\(h) hour\(h == 1 ? "" : "s")"
+    let mins = "\(m) minute\(m == 1 ? "" : "s")"
+    if h == 0 { return mins }
+    if m == 0 { return hours }
+    return hours + " " + mins
+}
+
+private func clockTime(_ date: Date) -> String {
+    date.formatted(date: .omitted, time: .shortened)
+}
+
+struct StartWearingIntent: AppIntent {
+    static let title: LocalizedStringResource = "Put lenses in"
+    static let description = IntentDescription("Starts the lens wear timer.")
+
+    @MainActor
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        guard let sync = SyncService.shared, sync.signedIn else {
+            return .result(dialog: "Open Lensy and sign in first.")
+        }
+        if sync.activeStartedAt != nil {
+            return .result(dialog: "Your timer is already running.")
+        }
+        if let worn = sync.weeklyWarningCount() {
+            try await requestConfirmation(
+                actionName: .continue,
+                dialog: "You've already worn your lenses on \(worn) of 7 days this week. Start anyway?"
+            )
+        }
+        sync.start()
+        await sync.waitForSync()
+        let removeAt = Date.now.addingTimeInterval(Double(wearLimitHours()) * 3600)
+        return .result(dialog: "Timer started. Take them out around \(clockTime(removeAt)).")
+    }
+}
+
+struct StopWearingIntent: AppIntent {
+    static let title: LocalizedStringResource = "Take lenses out"
+    static let description = IntentDescription("Stops the lens wear timer.")
+
+    @MainActor
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        guard let sync = SyncService.shared, sync.signedIn else {
+            return .result(dialog: "Open Lensy and sign in first.")
+        }
+        guard let start = sync.activeStartedAt else {
+            return .result(dialog: "Your lenses aren't being timed right now.")
+        }
+        let worn = Date.now.timeIntervalSince(start)
+        sync.stop()
+        await sync.waitForSync()
+        return .result(dialog: "Done. You wore them for \(spoken(worn)).")
+    }
+}
+
+struct AlreadyWearingIntent: AppIntent {
+    static let title: LocalizedStringResource = "Already wearing lenses"
+    static let description = IntentDescription("Starts the timer with the time you've already worn them.")
+
+    @Parameter(title: "Hours", requestValueDialog: "How many hours have you been wearing them?")
+    var hours: Int
+
+    @Parameter(title: "Minutes", default: 0)
+    var minutes: Int
+
+    @MainActor
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        guard let sync = SyncService.shared, sync.signedIn else {
+            return .result(dialog: "Open Lensy and sign in first.")
+        }
+        if sync.activeStartedAt != nil {
+            return .result(dialog: "Your timer is already running.")
+        }
+        let total = hours * 60 + minutes
+        guard total >= 0, total <= 20 * 60 else {
+            return .result(dialog: "That doesn't look right. Try a number of hours between 0 and 20.")
+        }
+        let start = Date.now.addingTimeInterval(-Double(total) * 60)
+        sync.start(at: start)
+        await sync.waitForSync()
+        let removeAt = start.addingTimeInterval(Double(wearLimitHours()) * 3600)
+        return .result(dialog: "Timer started from \(clockTime(start)). Take them out around \(clockTime(removeAt)).")
+    }
+}
+
+struct WearStatusIntent: AppIntent {
+    static let title: LocalizedStringResource = "Lens status"
+    static let description = IntentDescription("Tells you how long you've worn your lenses.")
+
+    @MainActor
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        guard let sync = SyncService.shared, sync.signedIn else {
+            return .result(dialog: "Open Lensy and sign in first.")
+        }
+        guard let start = sync.activeStartedAt else {
+            let days = sync.daysWornThisWeek()
+            return .result(dialog: "Your lenses are out. You've worn them on \(days) of 7 days this week.")
+        }
+        let elapsed = Date.now.timeIntervalSince(start)
+        let cap = Double(wearLimitHours()) * 3600
+        if elapsed > cap {
+            return .result(dialog: "You're \(spoken(elapsed - cap)) past your wear time. Time to take them out.")
+        }
+        let removeAt = start.addingTimeInterval(cap)
+        return .result(dialog: "They've been in for \(spoken(elapsed)). Take them out at \(clockTime(removeAt)).")
+    }
+}
+
+struct LensyShortcuts: AppShortcutsProvider {
+    static var appShortcuts: [AppShortcut] {
+        AppShortcut(
+            intent: StartWearingIntent(),
+            phrases: [
+                "Lenses in with \(.applicationName)",
+                "Put my lenses in with \(.applicationName)"
+            ],
+            shortTitle: "Lenses in",
+            systemImageName: "eye"
+        )
+        AppShortcut(
+            intent: StopWearingIntent(),
+            phrases: [
+                "Lenses out with \(.applicationName)",
+                "Take my lenses out with \(.applicationName)"
+            ],
+            shortTitle: "Lenses out",
+            systemImageName: "eye.slash"
+        )
+        AppShortcut(
+            intent: AlreadyWearingIntent(),
+            phrases: [
+                "Already wearing with \(.applicationName)",
+                "I'm already wearing my lenses in \(.applicationName)"
+            ],
+            shortTitle: "Already wearing",
+            systemImageName: "clock.arrow.circlepath"
+        )
+        AppShortcut(
+            intent: WearStatusIntent(),
+            phrases: [
+                "Lens status with \(.applicationName)",
+                "How long have I worn my lenses in \(.applicationName)"
+            ],
+            shortTitle: "Lens status",
+            systemImageName: "timer"
+        )
     }
 }
