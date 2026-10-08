@@ -12,6 +12,15 @@ private func hm(_ hours: Double) -> String {
     return m >= 60 ? "\(m / 60)h \(m % 60)m" : "\(m)m"
 }
 
+private func whenText(_ d: Date) -> String {
+    let cal = Calendar.current
+    let t = d.formatted(date: .omitted, time: .shortened)
+    if cal.isDateInToday(d) { return t }
+    if cal.isDateInYesterday(d) { return "Yesterday " + t }
+    if cal.isDateInTomorrow(d) { return "Tomorrow " + t }
+    return d.formatted(.dateTime.weekday(.abbreviated)) + " " + t
+}
+
 enum Period: String, CaseIterable, Hashable {
     case week = "Week"
     case month = "Month"
@@ -447,6 +456,48 @@ struct LoginView: View {
     }
 }
 
+struct SheetHeader: View {
+    let title: String
+    let subtitle: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.title3.weight(.semibold))
+            Text(subtitle)
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+struct StatTile: View {
+    let title: String
+    let value: String
+    var icon: String? = nil
+    var tint: Color = .primary
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 5) {
+                if let icon {
+                    Image(systemName: icon)
+                        .font(.caption2)
+                }
+                Text(title)
+                    .font(.caption)
+            }
+            .foregroundStyle(.secondary)
+            Text(value)
+                .font(.title3.weight(.semibold).monospacedDigit())
+                .foregroundStyle(tint)
+                .contentTransition(.numericText())
+                .animation(.snappy, value: value)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .card()
+    }
+}
+
 struct TimerTab: View {
     @Environment(SyncService.self) private var sync
     @Environment(NotificationService.self) private var notifier
@@ -455,7 +506,9 @@ struct TimerTab: View {
     let limit: Int
 
     @State private var restWarning: Int?
-    @State private var editingActive: WearSession?
+    @State private var adjusting = false
+
+    private var running: Bool { sync.activeStartedAt != nil }
 
     private func weeklyWarning() -> Int? {
         let cal = mondayCalendar
@@ -463,6 +516,34 @@ struct TimerTab: View {
         let days = wornDays(sessions, in: week)
         if days.contains(cal.startOfDay(for: .now)) { return nil }
         return days.count >= maxDays ? days.count : nil
+    }
+
+    private var weekLine: some View {
+        let cal = mondayCalendar
+        let week = cal.dateInterval(of: .weekOfYear, for: .now)
+            ?? DateInterval(start: .now, duration: 7 * 86400)
+        let worn = wornDays(sessions, in: week)
+        let days = (0..<7).compactMap { cal.date(byAdding: .day, value: $0, to: week.start) }
+
+        return HStack(spacing: 14) {
+            HStack(spacing: 8) {
+                ForEach(days, id: \.self) { day in
+                    let isToday = cal.isDateInToday(day)
+                    Circle()
+                        .fill(worn.contains(day) ? Color.green : Color.clear)
+                        .overlay(
+                            Circle().strokeBorder(
+                                isToday ? Color.accentColor : Color.primary.opacity(0.25),
+                                lineWidth: isToday ? 2 : 1
+                            )
+                        )
+                        .frame(width: 12, height: 12)
+                }
+            }
+            Text("\(worn.count) of \(maxDays) days this week")
+                .font(.callout)
+                .foregroundStyle(worn.count >= maxDays ? Color.orange : Color.secondary)
+        }
     }
 
     private var statTiles: some View {
@@ -475,9 +556,9 @@ struct TimerTab: View {
         let today = days.first { cal.isDateInToday($0.day) }?.hours ?? 0
 
         return HStack(spacing: 12) {
-            StatTile(title: "Today", value: hm(today))
-            StatTile(title: "Week total", value: hm(week))
-            StatTile(title: "Avg per day worn", value: hm(avg))
+            StatTile(title: "Today", value: hm(today), icon: "sun.max")
+            StatTile(title: "Week total", value: hm(week), icon: "calendar")
+            StatTile(title: "Avg per day worn", value: hm(avg), icon: "chart.bar")
         }
     }
 
@@ -486,10 +567,36 @@ struct TimerTab: View {
             Spacer(minLength: 0)
 
             if let start = sync.activeStartedAt {
-                LiveRing(start: start, limit: limit, size: 240)
-                Text("Put on " + start.formatted(date: .omitted, time: .shortened))
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                LiveRing(start: start, limit: limit, size: 240, showRemoveAt: false)
+
+                HStack(spacing: 16) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Put on").font(.caption2).foregroundStyle(.secondary)
+                        Text(whenText(start)).font(.callout.weight(.medium))
+                    }
+                    Spacer()
+                    Divider().frame(height: 24)
+                    Spacer()
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Remove at").font(.caption2).foregroundStyle(.secondary)
+                        Text(whenText(start.addingTimeInterval(Double(limit) * 3600))).font(.callout.weight(.medium))
+                    }
+                    Spacer()
+                    Button {
+                        adjusting = true
+                    } label: {
+                        Image(systemName: "pencil").font(.callout)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(8)
+                    .background(.primary.opacity(0.1), in: Circle())
+                    .help("Adjust start time")
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+                .background(.quaternary.opacity(0.5), in: Capsule())
+                .frame(maxWidth: 340)
+
             } else {
                 RingView(
                     progress: 0,
@@ -501,7 +608,7 @@ struct TimerTab: View {
             }
 
             Button {
-                if sync.activeStartedAt != nil {
+                if running {
                     sync.stop()
                 } else if let worn = weeklyWarning() {
                     restWarning = worn
@@ -510,28 +617,35 @@ struct TimerTab: View {
                 }
             } label: {
                 Label(
-                    sync.activeStartedAt == nil ? "Start" : "Stop",
-                    systemImage: sync.activeStartedAt == nil ? "play.fill" : "stop.fill"
+                    running ? "Stop" : "Start",
+                    systemImage: running ? "stop.fill" : "play.fill"
                 )
                 .frame(width: 150)
             }
-            .buttonStyle(.glassProminent)
+            .buttonStyle(.borderedProminent)
             .controlSize(.large)
-            .tint(sync.activeStartedAt == nil ? Color.accentColor : Color.red)
+            .tint(running ? Color.red : Color.accentColor)
 
-            if sync.activeStartedAt == nil {
-                Button("Already wearing them?") { notifier.askWornTime = true }
-                    .buttonStyle(.link)
-            } else {
-                Button("Adjust start time") {
-                    editingActive = sessions.first { $0.endedAt == nil }
+            if !running {
+                Button {
+                    notifier.askWornTime = true
+                } label: {
+                    HStack {
+                        Image(systemName: "clock.arrow.circlepath")
+                        Text("Already wearing them?")
+                    }
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 8)
+                    .padding(.horizontal, 16)
+                    .background(.quaternary.opacity(0.5), in: Capsule())
                 }
-                .buttonStyle(.link)
+                .buttonStyle(.plain)
             }
 
             TimelineView(.periodic(from: .now, by: 30)) { _ in
                 VStack(spacing: 12) {
-                    WeekStrip(sessions: sessions, maxDays: maxDays)
+                    weekLine
                     statTiles
                 }
             }
@@ -540,7 +654,10 @@ struct TimerTab: View {
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 16)
-        .sheet(item: $editingActive) { SessionEditor(session: $0) }
+        .animation(.snappy, value: running)
+        .sheet(isPresented: $adjusting) {
+            AdjustStartSheet(initial: sync.activeStartedAt ?? .now)
+        }
         .alert(
             "Take a rest day?",
             isPresented: Binding(
@@ -556,72 +673,33 @@ struct TimerTab: View {
     }
 }
 
-struct WeekStrip: View {
-    let sessions: [WearSession]
-    let maxDays: Int
-
-    var body: some View {
-        let cal = mondayCalendar
-        let week = cal.dateInterval(of: .weekOfYear, for: .now)
-            ?? DateInterval(start: .now, duration: 7 * 86400)
-        let worn = wornDays(sessions, in: week)
-        let days = (0..<7).compactMap { cal.date(byAdding: .day, value: $0, to: week.start) }
-        let count = worn.count
-
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("This week")
-                    .font(.subheadline.weight(.semibold))
-                Spacer()
-                Text("\(count) of \(maxDays) days")
-                    .font(.subheadline.monospacedDigit())
-                    .foregroundStyle(count >= maxDays ? Color.orange : Color.secondary)
-            }
-            HStack(spacing: 0) {
-                ForEach(days, id: \.self) { day in
-                    let isWorn = worn.contains(day)
-                    let isToday = cal.isDateInToday(day)
-                    VStack(spacing: 6) {
-                        Text(day.formatted(.dateTime.weekday(.narrow)))
-                            .font(.caption2)
-                            .foregroundStyle(isToday ? Color.primary : Color.secondary)
-                        Circle()
-                            .fill(isWorn ? Color.green : Color.clear)
-                            .overlay(
-                                Circle().strokeBorder(
-                                    isToday ? Color.accentColor : Color.secondary.opacity(0.35),
-                                    lineWidth: isToday ? 2 : 1
-                                )
-                            )
-                            .frame(width: 20, height: 20)
-                    }
-                    .frame(maxWidth: .infinity)
-                }
-            }
-        }
-        .card(padding: 14)
-    }
-}
-
 struct LiveRing: View {
     let start: Date
     let limit: Int
     var size: CGFloat = 260
+    var showRemoveAt = true
+
+    private func subtitle(elapsed: TimeInterval, cap: Double) -> String {
+        let remaining = cap - elapsed
+        let removeAt = start.addingTimeInterval(cap)
+        if remaining <= 0 {
+            let over = "Over by " + hm(-remaining / 3600)
+            return showRemoveAt ? "Remove lenses now\n" + over : over
+        }
+        let left = hm(remaining / 3600) + " left"
+        return showRemoveAt ? "Remove at " + whenText(removeAt) + "\n" + left : left
+    }
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { ctx in
             let elapsed = ctx.date.timeIntervalSince(start)
             let cap = Double(limit) * 3600
             let remaining = cap - elapsed
-            let removeAt = start.addingTimeInterval(cap)
             RingView(
                 progress: elapsed / cap,
                 color: remaining <= 0 ? .red : (remaining < cap * 0.15 ? .orange : .green),
                 title: clock(elapsed),
-                subtitle: remaining > 0
-                    ? "Remove at " + removeAt.formatted(date: .omitted, time: .shortened)
-                        + "\n" + hm(remaining / 3600) + " left"
-                    : "Remove lenses now\nOver by " + hm(-remaining / 3600),
+                subtitle: subtitle(elapsed: elapsed, cap: cap),
                 size: size
             )
         }
@@ -632,7 +710,7 @@ struct RingView: View {
     let progress: Double
     let color: Color
     let title: String
-    let subtitle: String
+    var subtitle: String = ""
     var size: CGFloat = 260
 
     var body: some View {
@@ -650,38 +728,23 @@ struct RingView: View {
                     .animation(.snappy, value: title)
                     .minimumScaleFactor(0.5)
                     .lineLimit(1)
-                Text(subtitle)
-                    .font(size < 200 ? .caption2 : .caption)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .lineLimit(2)
+                if !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(size < 200 ? .caption2 : .caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+                }
             }
             .padding(.horizontal, size * 0.14)
         }
         .frame(width: size, height: size)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(title + ", " + subtitle.replacingOccurrences(of: "\n", with: ", "))
-    }
-}
-
-struct StatTile: View {
-    let title: String
-    let value: String
-    var tint: Color = .primary
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(.title3.weight(.semibold).monospacedDigit())
-                .foregroundStyle(tint)
-                .contentTransition(.numericText())
-                .animation(.snappy, value: value)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .card()
+        .accessibilityLabel(
+            subtitle.isEmpty
+                ? title
+                : title + ", " + subtitle.replacingOccurrences(of: "\n", with: ", ")
+        )
     }
 }
 
@@ -732,6 +795,77 @@ struct WornTimeSheet: View {
         }
         .padding(20)
         .frame(width: 380)
+    }
+}
+
+struct AdjustStartSheet: View {
+    @Environment(SyncService.self) private var sync
+    @Environment(\.dismiss) private var dismiss
+    @AppStorage("wearLimitHours") private var limit = 14
+    @State private var start: Date
+
+    private let nudges = [-60, -30, -15, -5, 5, 15]
+
+    init(initial: Date) {
+        _start = State(initialValue: initial)
+    }
+
+    private func label(_ m: Int) -> String {
+        let sign = m < 0 ? "-" : "+"
+        let a = abs(m)
+        return a >= 60 ? "\(sign)\(a / 60)h" : "\(sign)\(a)m"
+    }
+
+    private func nudge(_ m: Int) {
+        start = min(start.addingTimeInterval(Double(m) * 60), Date.now)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            SheetHeader(
+                title: "Adjust start time",
+                subtitle: "Forgot to press Start? Set when you actually put them in."
+            )
+
+            DatePicker(
+                "Put on",
+                selection: $start,
+                in: Date.now.addingTimeInterval(-48 * 3600)...Date.now,
+                displayedComponents: [.date, .hourAndMinute]
+            )
+
+            HStack(spacing: 8) {
+                ForEach(nudges, id: \.self) { m in
+                    Button(label(m)) { nudge(m) }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .disabled(m > 0 && start.addingTimeInterval(Double(m) * 60) > Date.now)
+                }
+            }
+
+            Divider()
+
+            LabeledContent("Worn so far") {
+                Text(hm(Date.now.timeIntervalSince(start) / 3600)).monospacedDigit()
+            }
+            LabeledContent("Remove at") {
+                Text(whenText(start.addingTimeInterval(Double(limit) * 3600))).monospacedDigit()
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Save") {
+                    sync.adjustStart(to: start)
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 440)
     }
 }
 
@@ -858,9 +992,9 @@ struct HistoryTab: View {
             }
 
             HStack(spacing: 12) {
-                StatTile(title: "Total worn", value: hm(total))
-                StatTile(title: "Sessions", value: "\(visible.count)")
-                StatTile(title: "Avg per day", value: hm(avg))
+                StatTile(title: "Total worn", value: hm(total), icon: "clock")
+                StatTile(title: "Sessions", value: "\(visible.count)", icon: "number")
+                StatTile(title: "Avg per day", value: hm(avg), icon: "chart.bar")
             }
 
             if visible.isEmpty {
@@ -915,6 +1049,22 @@ struct HistoryTab: View {
     }
 }
 
+struct DurationBar: View {
+    let fraction: Double
+
+    var body: some View {
+        let f = min(max(fraction, 0), 1)
+        Capsule()
+            .fill(.quaternary)
+            .frame(width: 56, height: 5)
+            .overlay(alignment: .leading) {
+                Capsule()
+                    .fill(fraction > 1 ? Color.red : (fraction > 0.85 ? Color.orange : Color.green))
+                    .frame(width: 56 * f)
+            }
+    }
+}
+
 struct HistoryRow: View {
     let session: WearSession
     let limit: Int
@@ -942,10 +1092,13 @@ struct HistoryRow: View {
                     .padding(.horizontal, 8)
                     .padding(.vertical, 3)
                     .background(Color.green.opacity(0.18), in: Capsule())
-            } else if s.duration > Double(limit) * 3600 {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
-                    .help("Over your wear limit")
+            } else {
+                if s.duration > Double(limit) * 3600 {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .help("Over your wear limit")
+                }
+                DurationBar(fraction: s.duration / (Double(limit) * 3600))
             }
             Text(hm(s.duration / 3600))
                 .monospacedDigit()
@@ -1072,18 +1225,20 @@ struct ReportsTab: View {
                     columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 3),
                     spacing: 12
                 ) {
-                    StatTile(title: "Total worn", value: hm(total))
+                    StatTile(title: "Total worn", value: hm(total), icon: "clock")
                     StatTile(
                         title: "Days worn",
                         value: "\(worn.count) of \(days.count)",
+                        icon: "calendar",
                         tint: tooManyDays ? .orange : .primary
                     )
-                    StatTile(title: "Avg per day worn", value: hm(avg))
-                    StatTile(title: "Longest session", value: hm(longest / 3600))
-                    StatTile(title: "Sessions", value: "\(inRange.count)")
+                    StatTile(title: "Avg per day worn", value: hm(avg), icon: "chart.bar")
+                    StatTile(title: "Longest session", value: hm(longest / 3600), icon: "hourglass")
+                    StatTile(title: "Sessions", value: "\(inRange.count)", icon: "number")
                     StatTile(
                         title: "Over \(limit)h limit",
                         value: "\(over)",
+                        icon: "exclamationmark.triangle",
                         tint: over > 0 ? .orange : .primary
                     )
                 }
@@ -1183,7 +1338,7 @@ struct MenuContent: View {
         VStack(spacing: 14) {
             if let start = sync.activeStartedAt {
                 LiveRing(start: start, limit: limit, size: 190)
-                Text("Put on " + start.formatted(date: .omitted, time: .shortened))
+                Text("Put on " + whenText(start))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Button {

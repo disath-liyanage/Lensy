@@ -516,6 +516,15 @@ final class SyncService {
         refreshActive()
         Task { await sync(force: true) }
     }
+    
+    func adjustStart(to date: Date) {
+        guard let s = fetchActive() else { return }
+        s.startedAt = min(date, .now)
+        s.touch()
+        try? context.save()
+        refreshActive()
+        Task { await sync(force: true) }
+    }
 
     func unsyncedCount() -> Int {
         let d = FetchDescriptor<WearSession>(predicate: #Predicate { $0.needsSync == true })
@@ -730,8 +739,12 @@ struct AlreadyWearingIntent: AppIntent {
     @Parameter(title: "Hours", requestValueDialog: "How many hours have you been wearing them?")
     var hours: Int
 
-    @Parameter(title: "Minutes", default: 0)
+    @Parameter(title: "Minutes", requestValueDialog: "And how many minutes?")
     var minutes: Int
+
+    static var parameterSummary: some ParameterSummary {
+        Summary("Already wearing for \(\.$hours) hours and \(\.$minutes) minutes")
+    }
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
@@ -741,11 +754,10 @@ struct AlreadyWearingIntent: AppIntent {
         if sync.activeStartedAt != nil {
             return .result(dialog: "Your timer is already running.")
         }
-        let total = hours * 60 + minutes
-        guard total >= 0, total <= 20 * 60 else {
-            return .result(dialog: "That doesn't look right. Try a number of hours between 0 and 20.")
+        guard hours >= 0, minutes >= 0, minutes < 60, hours * 60 + minutes <= 20 * 60 else {
+            return .result(dialog: "That doesn't look right. Use 0 to 20 hours and 0 to 59 minutes.")
         }
-        let start = Date.now.addingTimeInterval(-Double(total) * 60)
+        let start = Date.now.addingTimeInterval(-Double(hours * 60 + minutes) * 60)
         sync.start(at: start)
         await sync.waitForSync()
         let removeAt = start.addingTimeInterval(Double(wearLimitHours()) * 3600)

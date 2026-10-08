@@ -40,6 +40,7 @@ struct LensyApp: App {
                 .environment(notifier)
         }
         .modelContainer(container)
+        .defaultSize(width: 980, height: 860)
 
         MenuBarExtra(isInserted: $timerRunning) {
             MenuContent()
