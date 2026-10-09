@@ -14,16 +14,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Select Latest Available Xcode
-        run: |
-          echo "Installed Xcode versions:"
-          ls /Applications | grep Xcode
-          
-          LATEST_XCODE=$(ls /Applications | grep -E '^Xcode_[0-9.]+\.app$' | sort -V | tail -n 1)
-          echo "Selecting /Applications/$LATEST_XCODE"
-          sudo xcode-select -s "/Applications/$LATEST_XCODE/Contents/Developer"
-
-
       - name: Build Lensy
         run: |
           xcodebuild \
