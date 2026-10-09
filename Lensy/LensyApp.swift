@@ -40,11 +40,17 @@ struct LensyApp: App {
                 .environment(notifier)
         }
         .modelContainer(container)
-        .defaultSize(width: 980, height: 860)
+        .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings") { notifier.openSettings() }
+                    .keyboardShortcut(",", modifiers: .command)
+            }
+        }
 
         MenuBarExtra(isInserted: $timerRunning) {
             MenuContent()
                 .environment(sync)
+                .environment(notifier)
         } label: {
             MenuLabel()
                 .environment(sync)

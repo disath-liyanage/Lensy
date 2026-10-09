@@ -143,6 +143,7 @@ final class AuthStore {
 @Observable @MainActor
 final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
     var askWornTime = false
+    var showSettings = false
     var denied = false
 
     @ObservationIgnored weak var sync: SyncService?
@@ -278,6 +279,11 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
 
     func sendTest(category: String) {
         scheduleIn(category: category, id: "test-\(category)", seconds: 10)
+    }
+    
+    func openSettings() {
+        showSettings = true
+        bringToFront()
     }
 
     private func bringToFront() {

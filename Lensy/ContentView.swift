@@ -104,6 +104,36 @@ extension View {
             .padding(padding)
             .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
     }
+
+    func hoverLift(_ scale: CGFloat = 1.04) -> some View {
+        modifier(HoverLift(scale: scale))
+    }
+}
+
+struct HoverLift: ViewModifier {
+    var scale: CGFloat = 1.04
+    @State private var hovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .scaleEffect(hovering ? scale : 1)
+            .animation(.snappy(duration: 0.18), value: hovering)
+            .onHover { hovering = $0 }
+    }
+}
+
+struct CountingText: View, Animatable {
+    var value: Double
+    let format: (Double) -> String
+
+    var animatableData: Double {
+        get { value }
+        set { value = newValue }
+    }
+
+    var body: some View {
+        Text(format(value))
+    }
 }
 
 struct PillBar<Option: Hashable>: View {
@@ -210,7 +240,6 @@ struct ContentView: View {
     @AppStorage("wearLimitHours") private var limit = 14
     @State private var tab: MainTab = .timer
     @State private var confirmSignOut = false
-    @State private var showSettings = false
 
     private var sessions: [WearSession] { all.filter { $0.deletedAt == nil } }
 
@@ -227,6 +256,12 @@ struct ContentView: View {
         }
         .toolbar(removing: .title)
         .frame(minWidth: 680, minHeight: 760)
+        .sheet(isPresented: Binding(
+            get: { notifier.showSettings },
+            set: { notifier.showSettings = $0 }
+        )) {
+            SettingsSheet()
+        }
         .task {
             sync.refreshActive()
             await auth.restore()
@@ -277,7 +312,6 @@ struct ContentView: View {
 
             ToolbarItem(placement: .primaryAction) { accountMenu }
         }
-        .sheet(isPresented: $showSettings) { SettingsSheet() }
         .sheet(isPresented: Binding(
             get: { notifier.askWornTime },
             set: { notifier.askWornTime = $0 }
@@ -334,8 +368,11 @@ struct ContentView: View {
         Menu {
             if let email = auth.email { Text(email) }
             Divider()
-            Button("Settings...") { showSettings = true }
-                .keyboardShortcut(",", modifiers: .command)
+            Button {
+                notifier.openSettings()
+            } label: {
+                Label("Settings", systemImage: "gearshape")
+            }
             Divider()
             Button("Sign out", role: .destructive) {
                 Task { await requestSignOut() }
@@ -395,86 +432,205 @@ struct SyncStatusView: View {
 struct LoginView: View {
     @Environment(AuthStore.self) private var auth
     @Environment(SyncService.self) private var sync
+
+    enum Field: Hashable { case email, password }
+
     @State private var email = ""
     @State private var password = ""
+    @State private var showPassword = false
     @State private var busy = false
-    @FocusState private var emailFocused: Bool
+    @FocusState private var focus: Field?
 
-    var body: some View {
-        VStack(spacing: 18) {
-            Image(nsImage: NSApp.applicationIconImage)
-                .resizable()
-                .frame(width: 96, height: 96)
-            Text("Lensy")
-                .font(.largeTitle.weight(.semibold))
-            Text("Sign in to track your lens wear")
-                .foregroundStyle(.secondary)
+    private var canSubmit: Bool { !email.isEmpty && !password.isEmpty && !busy }
 
-            VStack(spacing: 10) {
-                TextField("Email", text: $email)
-                    .textFieldStyle(.roundedBorder)
-                    .focused($emailFocused)
-                SecureField("Password", text: $password)
-                    .textFieldStyle(.roundedBorder)
-            }
-            .frame(width: 280)
-
-            if let e = auth.errorMessage {
-                Text(e)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .frame(width: 280)
-            }
-
-            Button {
-                busy = true
-                Task {
-                    await auth.signIn(email: email, password: password)
-                    if auth.isLoggedIn { await sync.sync(force: true) }
-                    busy = false
-                }
-            } label: {
-                Group {
-                    if busy {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Text("Sign in")
-                    }
-                }
-                .frame(width: 240)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .keyboardShortcut(.defaultAction)
-            .disabled(busy || email.isEmpty || password.isEmpty)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear {
-            auth.errorMessage = nil
-            emailFocused = true
+    private func submit() {
+        guard canSubmit else { return }
+        busy = true
+        Task {
+            await auth.signIn(
+                email: email.trimmingCharacters(in: .whitespaces),
+                password: password
+            )
+            if auth.isLoggedIn { await sync.sync(force: true) }
+            busy = false
         }
     }
-}
 
-struct SheetHeader: View {
-    let title: String
-    let subtitle: String
+    private var background: some View {
+        ZStack {
+            Color(nsColor: .windowBackgroundColor)
+            RadialGradient(
+                colors: [Color.accentColor.opacity(0.22), .clear],
+                center: .topLeading,
+                startRadius: 0,
+                endRadius: 560
+            )
+            RadialGradient(
+                colors: [Color.purple.opacity(0.14), .clear],
+                center: .bottomTrailing,
+                startRadius: 0,
+                endRadius: 560
+            )
+        }
+        .ignoresSafeArea()
+    }
+
+    private func field<Content: View>(
+        icon: String,
+        focused: Bool,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .foregroundStyle(focused ? Color.accentColor : Color.secondary)
+                .frame(width: 20)
+            HStack(spacing: 8) {
+                content()
+            }
+            .textFieldStyle(.plain)
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 46)
+        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(
+                    focused ? Color.accentColor : Color.primary.opacity(0.1),
+                    lineWidth: focused ? 2 : 1
+                )
+        )
+        .animation(.snappy(duration: 0.15), value: focused)
+    }
+
+    private var card: some View {
+        VStack(spacing: 28) {
+            VStack(spacing: 10) {
+                Image(nsImage: NSApp.applicationIconImage)
+                    .resizable()
+                    .frame(width: 84, height: 84)
+                Text("Welcome to Lensy")
+                    .font(.title.weight(.semibold))
+                Text("Sign in to track your lens wear")
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(spacing: 12) {
+                field(icon: "envelope", focused: focus == .email) {
+                    TextField("Email", text: $email)
+                        .focused($focus, equals: .email)
+                        .onSubmit { focus = .password }
+                }
+
+                field(icon: "lock", focused: focus == .password) {
+                    if showPassword {
+                        TextField("Password", text: $password)
+                            .focused($focus, equals: .password)
+                            .onSubmit(submit)
+                    } else {
+                        SecureField("Password", text: $password)
+                            .focused($focus, equals: .password)
+                            .onSubmit(submit)
+                    }
+                    Button {
+                        showPassword.toggle()
+                        focus = .password
+                    } label: {
+                        Image(systemName: showPassword ? "eye.slash" : "eye")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help(showPassword ? "Hide password" : "Show password")
+                }
+            }
+
+            if let e = auth.errorMessage {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                    Text(e)
+                        .font(.callout)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .foregroundStyle(.red)
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.red.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
+            }
+
+            Button(action: submit) {
+                ZStack {
+                    Text("Sign in")
+                        .opacity(busy ? 0 : 1)
+                    if busy {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(.white)
+                    }
+                }
+                .font(.body.weight(.semibold))
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .frame(height: 46)
+                .background(
+                    Color.accentColor.opacity(canSubmit || busy ? 1 : 0.4),
+                    in: RoundedRectangle(cornerRadius: 12)
+                )
+            }
+            .buttonStyle(.plain)
+            .disabled(!canSubmit)
+            .keyboardShortcut(.defaultAction)
+            .hoverLift(1.02)
+        }
+        .padding(36)
+        .frame(width: 400)
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 28))
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.title3.weight(.semibold))
-            Text(subtitle)
-                .foregroundStyle(.secondary)
+        ZStack {
+            background
+            card
+        }
+        .onAppear {
+            auth.errorMessage = nil
+            focus = .email
         }
     }
 }
 
 struct StatTile: View {
     let title: String
-    let value: String
+    let target: Double
     var icon: String? = nil
     var tint: Color = .primary
+    let format: (Double) -> String
+
+    @State private var shown: Double
+    @State private var hovering = false
+
+    init(
+        title: String,
+        target: Double,
+        icon: String? = nil,
+        tint: Color = .primary,
+        format: @escaping (Double) -> String
+    ) {
+        self.title = title
+        self.target = target
+        self.icon = icon
+        self.tint = tint
+        self.format = format
+        _shown = State(initialValue: target)
+    }
+
+    private func replay() {
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) { shown = 0 }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(30))
+            withAnimation(.easeOut(duration: 0.9)) { shown = target }
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -487,14 +643,186 @@ struct StatTile: View {
                     .font(.caption)
             }
             .foregroundStyle(.secondary)
-            Text(value)
+
+            CountingText(value: shown, format: format)
                 .font(.title3.weight(.semibold).monospacedDigit())
                 .foregroundStyle(tint)
-                .contentTransition(.numericText())
-                .animation(.snappy, value: value)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .card()
+        .scaleEffect(hovering ? 1.03 : 1)
+        .shadow(color: .black.opacity(hovering ? 0.12 : 0), radius: 8, y: 4)
+        .animation(.snappy(duration: 0.2), value: hovering)
+        .onHover { inside in
+            hovering = inside
+            if inside { replay() }
+        }
+        .onChange(of: target) { _, new in
+            withAnimation(.easeOut(duration: 0.5)) { shown = new }
+        }
+    }
+}
+
+struct PreviewStat: View {
+    let title: String
+    let main: String
+    let sub: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.caption2).foregroundStyle(.secondary)
+            Text(main).font(.callout.weight(.medium)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.8)
+            Text(sub).font(.caption2).foregroundStyle(sub == "Over limit" ? .red : .secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+struct PreviewStatCard<Content: View>: View {
+    let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            content
+        }
+        .padding(18)
+        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+struct DateTimeField: View {
+    @Binding var date: Date
+
+    private var days: [Date] {
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: .now)
+        var set = Set<Date>()
+        for back in 0...3 {
+            if let d = cal.date(byAdding: .day, value: -back, to: today) { set.insert(d) }
+        }
+        set.insert(cal.startOfDay(for: date))
+        return set.sorted(by: >)
+    }
+
+    private func dayLabel(_ d: Date) -> String {
+        let cal = Calendar.current
+        let md = d.formatted(.dateTime.month(.abbreviated).day())
+        if cal.isDateInToday(d) { return "Today, " + md }
+        if cal.isDateInYesterday(d) { return "Yesterday, " + md }
+        return d.formatted(.dateTime.weekday(.abbreviated)) + ", " + md
+    }
+
+    private func setDay(_ day: Date) {
+        let cal = Calendar.current
+        let t = cal.dateComponents([.hour, .minute], from: date)
+        var c = cal.dateComponents([.year, .month, .day], from: day)
+        c.hour = t.hour
+        c.minute = t.minute
+        if let d = cal.date(from: c) { date = min(d, Date.now) }
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            DatePicker("", selection: $date, displayedComponents: .hourAndMinute)
+                .labelsHidden()
+                .frame(maxWidth: .infinity)
+
+            Divider()
+                .frame(height: 26)
+
+            Menu {
+                ForEach(days, id: \.self) { d in
+                    Button(dayLabel(d)) { setDay(d) }
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Text(date.formatted(.dateTime.month(.abbreviated).day()))
+                        .font(.body.monospacedDigit())
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .frame(maxWidth: .infinity)
+        }
+        .padding(.vertical, 10)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+        .onChange(of: date) { _, v in
+            if v > Date.now { date = Date.now }
+        }
+    }
+}
+
+struct DayDot: View {
+    let worn: Bool
+    let today: Bool
+    let future: Bool
+    let label: String
+
+    @State private var hovering = false
+
+    var body: some View {
+        ZStack {
+            if today {
+                Circle().fill(Color.accentColor.opacity(0.18))
+                Circle().strokeBorder(Color.accentColor, lineWidth: 2)
+            }
+            Circle()
+                .fill(worn ? Color.green : (today ? Color.accentColor : Color.clear))
+                .overlay(
+                    Circle().strokeBorder(
+                        Color.primary.opacity(future ? 0.12 : 0.28),
+                        lineWidth: (worn || today) ? 0 : 1
+                    )
+                )
+                .frame(width: 14, height: 14)
+        }
+        .frame(width: 28, height: 28)
+        .scaleEffect(hovering ? 1.25 : 1)
+        .animation(.snappy(duration: 0.18), value: hovering)
+        .onHover { hovering = $0 }
+        .help(label)
+    }
+}
+
+struct WeekLine: View {
+    let sessions: [WearSession]
+    let maxDays: Int
+
+    var body: some View {
+        let cal = mondayCalendar
+        let week = cal.dateInterval(of: .weekOfYear, for: .now)
+            ?? DateInterval(start: .now, duration: 7 * 86400)
+        let worn = wornDays(sessions, in: week)
+        let days = (0..<7).compactMap { cal.date(byAdding: .day, value: $0, to: week.start) }
+        let todayStart = cal.startOfDay(for: .now)
+
+        HStack(spacing: 16) {
+            HStack(spacing: 6) {
+                ForEach(days, id: \.self) { day in
+                    let isWorn = worn.contains(day)
+                    DayDot(
+                        worn: isWorn,
+                        today: cal.isDateInToday(day),
+                        future: day > todayStart,
+                        label: day.formatted(.dateTime.weekday(.wide).month(.abbreviated).day())
+                            + (isWorn ? " - worn" : "")
+                    )
+                }
+            }
+
+            Text("\(worn.count) of \(maxDays) days this week")
+                .font(.callout)
+                .foregroundStyle(worn.count >= maxDays ? Color.orange : Color.secondary)
+        }
     }
 }
 
@@ -518,34 +846,6 @@ struct TimerTab: View {
         return days.count >= maxDays ? days.count : nil
     }
 
-    private var weekLine: some View {
-        let cal = mondayCalendar
-        let week = cal.dateInterval(of: .weekOfYear, for: .now)
-            ?? DateInterval(start: .now, duration: 7 * 86400)
-        let worn = wornDays(sessions, in: week)
-        let days = (0..<7).compactMap { cal.date(byAdding: .day, value: $0, to: week.start) }
-
-        return HStack(spacing: 14) {
-            HStack(spacing: 8) {
-                ForEach(days, id: \.self) { day in
-                    let isToday = cal.isDateInToday(day)
-                    Circle()
-                        .fill(worn.contains(day) ? Color.green : Color.clear)
-                        .overlay(
-                            Circle().strokeBorder(
-                                isToday ? Color.accentColor : Color.primary.opacity(0.25),
-                                lineWidth: isToday ? 2 : 1
-                            )
-                        )
-                        .frame(width: 12, height: 12)
-                }
-            }
-            Text("\(worn.count) of \(maxDays) days this week")
-                .font(.callout)
-                .foregroundStyle(worn.count >= maxDays ? Color.orange : Color.secondary)
-        }
-    }
-
     private var statTiles: some View {
         let cal = mondayCalendar
         let weekIV = interval(.week, anchor: .now) ?? DateInterval(start: .now, duration: 86400)
@@ -556,9 +856,9 @@ struct TimerTab: View {
         let today = days.first { cal.isDateInToday($0.day) }?.hours ?? 0
 
         return HStack(spacing: 12) {
-            StatTile(title: "Today", value: hm(today), icon: "sun.max")
-            StatTile(title: "Week total", value: hm(week), icon: "calendar")
-            StatTile(title: "Avg per day worn", value: hm(avg), icon: "chart.bar")
+            StatTile(title: "Today", target: today, icon: "sun.max") { hm($0) }
+            StatTile(title: "Week total", target: week, icon: "calendar") { hm($0) }
+            StatTile(title: "Avg per day worn", target: avg, icon: "chart.bar") { hm($0) }
         }
     }
 
@@ -568,6 +868,7 @@ struct TimerTab: View {
 
             if let start = sync.activeStartedAt {
                 LiveRing(start: start, limit: limit, size: 240, showRemoveAt: false)
+
                 HStack(spacing: 0) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Put on")
@@ -579,11 +880,11 @@ struct TimerTab: View {
                             .minimumScaleFactor(0.85)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    
+
                     Divider()
                         .frame(height: 28)
                         .padding(.horizontal, 16)
-                    
+
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Remove at")
                             .font(.caption2)
@@ -594,7 +895,7 @@ struct TimerTab: View {
                             .minimumScaleFactor(0.85)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    
+
                     Button {
                         adjusting = true
                     } label: {
@@ -605,6 +906,7 @@ struct TimerTab: View {
                             .background(Color.primary.opacity(0.08), in: Circle())
                     }
                     .buttonStyle(.plain)
+                    .hoverLift(1.12)
                     .padding(.leading, 12)
                     .help("Adjust start time")
                 }
@@ -642,6 +944,7 @@ struct TimerTab: View {
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
             .tint(running ? Color.red : Color.accentColor)
+            .hoverLift()
 
             if !running {
                 Button {
@@ -658,11 +961,12 @@ struct TimerTab: View {
                     .background(.quaternary.opacity(0.5), in: Capsule())
                 }
                 .buttonStyle(.plain)
+                .hoverLift()
             }
 
             TimelineView(.periodic(from: .now, by: 30)) { _ in
-                VStack(spacing: 12) {
-                    weekLine
+                VStack(spacing: 16) {
+                    WeekLine(sessions: sessions, maxDays: maxDays)
                     statTiles
                 }
             }
@@ -769,33 +1073,49 @@ struct WornTimeSheet: View {
     @Environment(SyncService.self) private var sync
     @Environment(\.dismiss) private var dismiss
     @AppStorage("wearLimitHours") private var limit = 14
-    @State private var hours = 1
-    @State private var minutes = 0
+    @State private var start: Date = Date.now.addingTimeInterval(-3600)
 
-    private var started: Date {
-        Date.now.addingTimeInterval(-Double(hours * 3600 + minutes * 60))
+    private let nudges = [-60, -30, -15, -5, 5, 15]
+
+    private func label(_ m: Int) -> String {
+        let sign = m < 0 ? "-" : "+"
+        let a = abs(m)
+        return a >= 60 ? "\(sign)\(a / 60)h" : "\(sign)\(a)m"
+    }
+
+    private func nudge(_ m: Int) {
+        start = min(start.addingTimeInterval(Double(m) * 60), Date.now)
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 20) {
             Text("Already wearing them?")
                 .font(.headline)
-            Text("How long have you had your lenses in?")
-                .foregroundStyle(.secondary)
 
-            HStack(spacing: 28) {
-                Stepper("\(hours) h", value: $hours, in: 0...20)
-                Stepper("\(minutes) min", value: $minutes, in: 0...55, step: 5)
+            DateTimeField(date: $start)
+
+            HStack(spacing: 8) {
+                ForEach(nudges, id: \.self) { m in
+                    Button(label(m)) { nudge(m) }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .disabled(m > 0 && start.addingTimeInterval(Double(m) * 60) > Date.now)
+                }
             }
 
-            Divider()
-
-            LabeledContent("Put on at") {
-                Text(started.formatted(date: .omitted, time: .shortened))
-            }
-            LabeledContent("Remove at") {
-                Text(started.addingTimeInterval(Double(limit) * 3600)
-                    .formatted(date: .omitted, time: .shortened))
+            PreviewStatCard {
+                let removeAt = start.addingTimeInterval(Double(limit) * 3600)
+                PreviewStat(
+                    title: "Put on",
+                    main: start.formatted(date: .omitted, time: .shortened),
+                    sub: start.formatted(.dateTime.month(.abbreviated).day())
+                )
+                Divider().frame(height: 36).padding(.horizontal, 14)
+                PreviewStat(
+                    title: "Remove at",
+                    main: removeAt.formatted(date: .omitted, time: .shortened),
+                    sub: removeAt.formatted(.dateTime.month(.abbreviated).day())
+                )
             }
 
             HStack {
@@ -803,14 +1123,14 @@ struct WornTimeSheet: View {
                 Button("Cancel") { dismiss() }
                     .keyboardShortcut(.cancelAction)
                 Button("Start timer") {
-                    sync.start(at: started)
+                    sync.start(at: start)
                     dismiss()
                 }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
             }
         }
-        .padding(20)
+        .padding(24)
         .frame(width: 380)
     }
 }
@@ -838,18 +1158,11 @@ struct AdjustStartSheet: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            SheetHeader(
-                title: "Adjust start time",
-                subtitle: "Forgot to press Start? Set when you actually put them in."
-            )
+        VStack(alignment: .leading, spacing: 20) {
+            Text("Adjust start time")
+                .font(.headline)
 
-            DatePicker(
-                "Put on",
-                selection: $start,
-                in: Date.now.addingTimeInterval(-48 * 3600)...Date.now,
-                displayedComponents: [.date, .hourAndMinute]
-            )
+            DateTimeField(date: $start)
 
             HStack(spacing: 8) {
                 ForEach(nudges, id: \.self) { m in
@@ -860,13 +1173,23 @@ struct AdjustStartSheet: View {
                 }
             }
 
-            Divider()
+            PreviewStatCard {
+                let limitSecs = Double(limit) * 3600
+                let wornSecs = Date.now.timeIntervalSince(start)
+                let isFuture = start > Date.now
+                let removeAt = start.addingTimeInterval(limitSecs)
 
-            LabeledContent("Worn so far") {
-                Text(hm(Date.now.timeIntervalSince(start) / 3600)).monospacedDigit()
-            }
-            LabeledContent("Remove at") {
-                Text(whenText(start.addingTimeInterval(Double(limit) * 3600))).monospacedDigit()
+                PreviewStat(
+                    title: "Worn so far",
+                    main: isFuture ? "0m" : hm(wornSecs / 3600),
+                    sub: wornSecs > limitSecs && !isFuture ? "Over limit" : " "
+                )
+                Divider().frame(height: 36).padding(.horizontal, 14)
+                PreviewStat(
+                    title: "Remove at",
+                    main: removeAt.formatted(date: .omitted, time: .shortened),
+                    sub: removeAt.formatted(.dateTime.month(.abbreviated).day())
+                )
             }
 
             HStack {
@@ -881,8 +1204,8 @@ struct AdjustStartSheet: View {
                 .keyboardShortcut(.defaultAction)
             }
         }
-        .padding(20)
-        .frame(width: 440)
+        .padding(24)
+        .frame(width: 380)
     }
 }
 
@@ -1009,9 +1332,11 @@ struct HistoryTab: View {
             }
 
             HStack(spacing: 12) {
-                StatTile(title: "Total worn", value: hm(total), icon: "clock")
-                StatTile(title: "Sessions", value: "\(visible.count)", icon: "number")
-                StatTile(title: "Avg per day", value: hm(avg), icon: "chart.bar")
+                StatTile(title: "Total worn", target: total, icon: "clock") { hm($0) }
+                StatTile(title: "Sessions", target: Double(visible.count), icon: "number") {
+                    "\(Int($0.rounded()))"
+                }
+                StatTile(title: "Avg per day", target: avg, icon: "chart.bar") { hm($0) }
             }
 
             if visible.isEmpty {
@@ -1242,22 +1567,24 @@ struct ReportsTab: View {
                     columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 3),
                     spacing: 12
                 ) {
-                    StatTile(title: "Total worn", value: hm(total), icon: "clock")
+                    StatTile(title: "Total worn", target: total, icon: "clock") { hm($0) }
                     StatTile(
                         title: "Days worn",
-                        value: "\(worn.count) of \(days.count)",
+                        target: Double(worn.count),
                         icon: "calendar",
                         tint: tooManyDays ? .orange : .primary
-                    )
-                    StatTile(title: "Avg per day worn", value: hm(avg), icon: "chart.bar")
-                    StatTile(title: "Longest session", value: hm(longest / 3600), icon: "hourglass")
-                    StatTile(title: "Sessions", value: "\(inRange.count)", icon: "number")
+                    ) { "\(Int($0.rounded())) of \(days.count)" }
+                    StatTile(title: "Avg per day worn", target: avg, icon: "chart.bar") { hm($0) }
+                    StatTile(title: "Longest session", target: longest / 3600, icon: "hourglass") { hm($0) }
+                    StatTile(title: "Sessions", target: Double(inRange.count), icon: "number") {
+                        "\(Int($0.rounded()))"
+                    }
                     StatTile(
                         title: "Over \(limit)h limit",
-                        value: "\(over)",
+                        target: Double(over),
                         icon: "exclamationmark.triangle",
                         tint: over > 0 ? .orange : .primary
-                    )
+                    ) { "\(Int($0.rounded()))" }
                 }
 
                 Text("Hours worn per day")
@@ -1368,6 +1695,10 @@ struct MenuContent: View {
                         .background(Color.red, in: Capsule())
                 }
                 .buttonStyle(.plain)
+            } else {
+                Text("Lenses are out")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             }
         }
         .padding(18)
