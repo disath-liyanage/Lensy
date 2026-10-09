@@ -4,10 +4,21 @@
     {
       "layers" : [
         {
-          "blend-mode" : "normal",
-          "hidden" : false,
-          "image-name" : "Orbiting Aqua Lens Logo.png",
-          "name" : "Orbiting Aqua Lens Logo"
+          "fill-specializations" : [
+            {
+              "appearance" : "dark",
+              "value" : "system-light"
+            }
+          ],
+          "image-name" : "Lensy Logo.png",
+          "name" : "Lensy Logo",
+          "position" : {
+            "scale" : 0.23,
+            "translation-in-points" : [
+              0,
+              0
+            ]
+          }
         }
       ],
       "shadow" : {
